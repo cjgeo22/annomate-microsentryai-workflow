@@ -2,9 +2,8 @@
 Abstract Strategy Interface.
 
 This module defines the `AnomalyDetectionStrategy` abstract base class.
-It establishes the contract that all specific model implementations (e.g.,
-AnomalibStrategy) must fulfill, ensuring a consistent API for loading models
-and running inference regardless of the underlying algorithm.
+It establishes the contract that all specific model implementations must fulfill, 
+ensuring a consistent API for loading models and running inference.
 """
 
 from abc import ABC, abstractmethod
@@ -16,10 +15,6 @@ import numpy as np
 class AnomalyDetectionStrategy(ABC):
     """
     Abstract base class for all anomaly detection model strategies.
-
-    This interface mandates that any concrete strategy must implement methods
-    for loading model artifacts from a folder and performing inference on a
-    single image.
     """
 
     def __init__(self):

@@ -1,14 +1,23 @@
+"""
+Mask Comparator Module.
+
+Handles the calculation of metrics and visualization generation between a 
+ground truth mask and a prediction mask.
+"""
+
 import cv2
 import numpy as np
 import math
 from typing import Tuple, Dict, Any, Optional
 
+
 class MaskComparator:
     """
-    Handles the calculation of metrics and visualization generation between a 
-    ground truth and a prediction mask, which must be provided as NumPy arrays.
+    Computes validation metrics (IoU, Precision, Recall) and generates 
+    visual overlap maps between two binary NumPy arrays.
     """
-    def __init__(self, gt_outline_color: Tuple[int, int, int], gt_outline_thickness: int):
+    
+    def __init__(self, gt_outline_color: Tuple[int, int, int] = (0, 0, 255), gt_outline_thickness: int = 2):
         self.gt_outline_color = gt_outline_color
         self.gt_outline_thickness = gt_outline_thickness
 
@@ -16,7 +25,6 @@ class MaskComparator:
         """Helper to compute the centroid (cx, cy) of a binary mask."""
         if area > 0:
             M = cv2.moments(mask)
-            # Ensure division by zero is avoided
             if M["m00"] != 0:
                 cx = int(M["m10"] / M["m00"])
                 cy = int(M["m01"] / M["m00"])
@@ -48,7 +56,6 @@ class MaskComparator:
         # Calculate Euclidean Distance
         euclidean_distance = None
         if cx_gt is not None and cx_pred is not None:
-            # Note: Fixed the potential bug in the original script where cy_gt was used twice in distance calculation.
             euclidean_distance = math.sqrt((cx_pred - cx_gt)**2 + (cy_pred - cy_gt)**2)
 
         return {

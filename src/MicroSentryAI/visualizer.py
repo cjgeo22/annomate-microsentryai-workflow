@@ -5,17 +5,12 @@ This module provides a high-fidelity Graphical User Interface (GUI) for
 AI-assisted defect detection and validation. It utilizes the PyQt5 framework 
 to synchronize dual viewports for side-by-side analysis of raw data and 
 statistical anomaly heatmaps.
-
-Key Components:
-    * MicroSentryWindow: Primary application controller and interface.
-    * SegPathItem & VertexHandle: Graphics primitives for polygon manipulation.
-    * SyncedGraphicsView: Viewport with spatial synchronization logic.
-    * InferenceWorker: QThread implementation for non-blocking model execution.
 """
 
 import os
 import glob
 import sys
+import logging
 import numpy as np
 import cv2
 import torch
@@ -42,34 +37,13 @@ from PyQt5.QtWidgets import (
     QInputDialog
 )
 
-# Configuration for relative module discovery
-current_dir = Path(__file__).resolve().parent
-parent_dir = current_dir.parent
-if str(parent_dir) not in sys.path:
-    sys.path.insert(0, str(parent_dir))
+# Cross-module imports (Dummy classes removed)
+from AnnoMate.widgets import WrappingTableWidget, CustomSplitter
+from AnnoMate.styles import SPLITTER_STYLE, MAIN_STYLESHEET
 
 from .strategies.anomalib_strategy import AnomalibStrategy
 
-# Attempt to integrate with AnnoMate ecosystem; implement fallbacks for standalone execution
-try:
-    from AnnoMate.widgets import WrappingTableWidget, CustomSplitter
-    from AnnoMate.styles import SPLITTER_STYLE, MAIN_STYLESHEET
-except ImportError as e:
-    print(f"CRITICAL: Integration modules not found: {e}")
-    print("Initializing internal fallback components.")
-    
-    class WrappingTableWidget(QTableWidget):
-        """Internal implementation of table widget behavior."""
-        def keyPressEvent(self, event):
-            super().keyPressEvent(event)
-
-    class CustomSplitter(QSplitter):
-        """Internal implementation of splitter behavior."""
-        pass
-
-    SPLITTER_STYLE = ""
-    MAIN_STYLESHEET = ""
-
+logger = logging.getLogger(__name__)
 
 # =========================================================================
 # GRAPHICS PRIMITIVES
@@ -77,15 +51,8 @@ except ImportError as e:
 
 HANDLE_RADIUS = 4.0
 
-
 class VertexHandle(QGraphicsEllipseItem):
-    """
-    Interactive handle for controlling individual vertices within a SegPathItem.
-    
-    Attributes:
-        parent_item (SegPathItem): The parent polygon object.
-        idx (int): The index of the vertex in the parent's coordinate list.
-    """
+    """Interactive handle for controlling individual vertices within a SegPathItem."""
 
     def __init__(self, parent: 'SegPathItem', idx: int, pos: QPointF):
         super().__init__(-HANDLE_RADIUS, -HANDLE_RADIUS, HANDLE_RADIUS * 2, HANDLE_RADIUS * 2, parent)
@@ -95,6 +62,9 @@ class VertexHandle(QGraphicsEllipseItem):
         self.setFlag(QGraphicsEllipseItem.ItemIsMovable, True)
         self.setFlag(QGraphicsEllipseItem.ItemSendsGeometryChanges, True)
         self.setZValue(100)
+
+        # --- NEW: Changes cursor to precision crosshair when hovering over the vertex ---
+        self.setCursor(Qt.CrossCursor)
         
         self.parent_item = parent
         self.idx = idx
@@ -130,19 +100,13 @@ class VertexHandle(QGraphicsEllipseItem):
         event.accept()
 
     def cleanup(self):
-        """Safely removes handle from scene and parent."""
         self.setParentItem(None)
         if self.scene():
             self.scene().removeItem(self)
 
 
 class SegPathItem(QGraphicsPathItem):
-    """
-    An editable polygon primitive representing segmented regions of interest.
-    
-    Supports Douglas-Peucker simplification, affine scaling, and vertex-level 
-    spatial transformations.
-    """
+    """An editable polygon primitive representing segmented regions of interest."""
 
     def __init__(self, pts: List[QPointF], on_any_edit=None):
         super().__init__()
@@ -153,13 +117,13 @@ class SegPathItem(QGraphicsPathItem):
         self.handles: List[VertexHandle] = []
         self._pts = pts[:]
         self.lock_move = False
+        self.is_editing = False  # --- NEW: Tracks if vertices are visible ---
         self.on_any_edit = on_any_edit
         
         self.setZValue(10)
         self._rebuild_path()
 
     def _rebuild_path(self):
-        """Constructs a QPainterPath from the current vertex sequence."""
         path = QPainterPath()
         if self._pts:
             path.moveTo(self._pts[0])
@@ -169,24 +133,34 @@ class SegPathItem(QGraphicsPathItem):
         self.setPath(path)
 
     def paint(self, painter, option, widget=None):
-        """Overrides default paint behavior to update pens based on selection state."""
         self.setPen(self.pen_selected if self.isSelected() else self.pen_normal)
         super().paint(painter, option, widget)
 
-    def set_selected(self, selected: bool):
-        """Updates selection state and toggles visibility of control handles."""
-        self.setSelected(selected)
-        if selected and not self.handles:
+    def mouseDoubleClickEvent(self, event):
+        self.is_editing = not self.is_editing
+        self.update_handles()
+        super().mouseDoubleClickEvent(event)
+
+    def update_handles(self):
+        if self.is_editing and not self.handles:
             for i, p in enumerate(self._pts):
                 h = VertexHandle(parent=self, idx=i, pos=p)
                 self.handles.append(h)
-        elif not selected and self.handles:
+        elif not self.is_editing and self.handles:
             for h in self.handles:
                 h.cleanup()
             self.handles = []
 
+    def itemChange(self, change, value):
+        if change == QGraphicsPathItem.ItemPositionChange and self.lock_move:
+            return self.pos()
+        # Clean up handles if the user clicks off the polygon
+        if change == QGraphicsPathItem.ItemSelectedHasChanged and not value:
+            self.is_editing = False
+            self.update_handles()
+        return super().itemChange(change, value)
+
     def update_vertex(self, idx: int, newpos: QPointF):
-        """Updates internal coordinates and redraws path path geometry."""
         if 0 <= idx < len(self._pts):
             self._pts[idx] = newpos
             self._rebuild_path()
@@ -194,12 +168,6 @@ class SegPathItem(QGraphicsPathItem):
                 self.on_any_edit('vertex_drag')
 
     def simplify(self, epsilon: float):
-        """
-        Reduces vertex count using the Douglas-Peucker algorithm.
-        
-        Args:
-            epsilon (float): Distance tolerance for simplification.
-        """
         if len(self._pts) < 3:
             return
             
@@ -224,7 +192,6 @@ class SegPathItem(QGraphicsPathItem):
             self.on_any_edit('polygon_simplify')
 
     def itemChange(self, change, value):
-        """Locks item transformation if a vertex drag operation is in progress."""
         if change == QGraphicsPathItem.ItemPositionChange and self.lock_move:
             return self.pos()
         return super().itemChange(change, value)
@@ -240,7 +207,6 @@ class SegPathItem(QGraphicsPathItem):
                 self.on_any_edit('polygon_move')
 
     def scale_about_center(self, factor: float):
-        """Applies a uniform scale transformation relative to the polygon centroid."""
         if not self._pts:
             return
         cx = sum(p.x() for p in self._pts) / len(self._pts)
@@ -262,12 +228,7 @@ class SegPathItem(QGraphicsPathItem):
 
 
 class SyncedGraphicsView(QGraphicsView):
-    """
-    A viewport implementation that facilitates synchronized multi-view rendering.
-    
-    Signals:
-        viewChanged: Emits normalized center ratios (x, y) and absolute scale.
-    """
+    """A viewport implementation that facilitates synchronized multi-view rendering."""
     viewChanged = pyqtSignal(float, float, float)
 
     def __init__(self, scene, parent=None):
@@ -281,7 +242,6 @@ class SyncedGraphicsView(QGraphicsView):
         self.verticalScrollBar().valueChanged.connect(self._emit_view)
 
     def _emit_view(self):
-        """Calculates and emits the current spatial state of the viewport."""
         if self._is_syncing:
             return
         if self.sceneRect().width() <= 0 or self.sceneRect().height() <= 0:
@@ -296,21 +256,25 @@ class SyncedGraphicsView(QGraphicsView):
         self.viewChanged.emit(rx, ry, scale)
 
     def wheelEvent(self, event):
-        """Implements exponential zoom anchored at the cursor position."""
-        zoom_in_factor = 1.15
-        zoom_out_factor = 1 / zoom_in_factor
+        delta = event.angleDelta().y()
+        if delta == 0:
+            return
 
-        if event.angleDelta().y() > 0:
-            zoom_factor = zoom_in_factor
-        else:
-            zoom_factor = zoom_out_factor
+        # --- BUG FIX: Touchpad Sensitivity ---
+        # 120 is the standard single 'click' on a mouse scroll wheel.
+        steps = delta / 120.0
+        
+        # Clamp steps to prevent wild jumps from aggressive touchpad swipes
+        steps = max(-5.0, min(5.0, steps))
+        
+        # Smoothly calculate zoom factor based on the exact scroll distance
+        zoom_factor = 1.15 ** steps
 
         self.scale(zoom_factor, zoom_factor)
         self._emit_view()
         event.accept()
 
     def set_view_state(self, rx: float, ry: float, scale: float):
-        """Updates viewport position and scale based on external signals."""
         if self.sceneRect().width() <= 0:
             return
             
@@ -330,29 +294,17 @@ class SyncedGraphicsView(QGraphicsView):
 # =========================================================================
 
 def reconstruct_display_crop(orig: Image.Image, target_size: int) -> Tuple[Image.Image, Tuple[float, float], Tuple[int, int]]:
-    """
-    Resizes the image to fit within target_size x target_size while maintaining aspect ratio.
-    Does NOT crop the image, allowing full-image segmentation visualization.
-    
-    Returns:
-        Tuple containing the processed Image, (scale_x, scale_y), and (offset_x, offset_y).
-        Note: Offsets are (0, 0) as no cropping occurs.
-    """
     w, h = orig.size
-    # Scale based on the largest dimension to fit within the box
     scale = target_size / max(w, h)
     
     new_w = int(round(w * scale))
     new_h = int(round(h * scale))
         
     img = orig.resize((new_w, new_h), Image.LANCZOS)
-    
-    # Return (img, scale_factor, offset)
     return img, (scale, scale), (0, 0)
 
 
 def pil_to_qpixmap(pil_img: Image.Image) -> QPixmap:
-    """Utility to bridge PIL Image objects with Qt QPixmap representations."""
     rgb = pil_img.convert("RGB")
     w, h = rgb.size
     data = rgb.tobytes("raw", "RGB")
@@ -361,14 +313,7 @@ def pil_to_qpixmap(pil_img: Image.Image) -> QPixmap:
 
 
 class InferenceWorker(QThread):
-    """
-    Concurrent execution engine for anomaly model inference.
-    
-    Signals:
-        resultReady: Emits file path and the raw anomaly score map.
-        progress: Emits integer percentage or step count.
-        finished: Emits on completion of the input file list.
-    """
+    """Concurrent execution engine for anomaly model inference."""
     resultReady = pyqtSignal(str, object) 
     progress = pyqtSignal(int)
     finished = pyqtSignal()
@@ -380,22 +325,20 @@ class InferenceWorker(QThread):
         self.is_running = True
 
     def run(self):
-        """Iterates through the file list and executes strategy prediction."""
         for i, path in enumerate(self.file_list):
             if not self.is_running:
                 break
             try:
                 _, score_map = self.strategy.predict(path)
                 self.resultReady.emit(path, score_map)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"Inference failed for {path}: {e}")
             
             self.progress.emit(i + 1)
         
         self.finished.emit()
 
     def stop(self):
-        """Terminates thread execution after the current iteration."""
         self.is_running = False
 
 
@@ -406,9 +349,6 @@ class InferenceWorker(QThread):
 class MicroSentryWindow(QMainWindow):
     """
     Main controller for the MicroSentryAI ecosystem.
-    
-    Manages state synchronization between the model strategy, local dataset 
-    management, and dual-viewport rendering.
     """
     polygonsSent = pyqtSignal(list, str)
     imageIndexChanged = pyqtSignal(int)
@@ -444,7 +384,23 @@ class MicroSentryWindow(QMainWindow):
         self.inference_cache = {}
         self.worker: Optional[InferenceWorker] = None
 
+        # --- FIX: Locate the icon path BEFORE building the UI ---
+        self._set_window_icon()
         self._init_ui()
+
+    def _set_window_icon(self):
+        """Resolves filesystem paths to locate application branding."""
+        here = os.path.dirname(os.path.abspath(__file__))
+        project_root = os.path.abspath(os.path.join(here, "..", ".."))
+        self.icon_path = None
+        
+        # Search for both specific and general AnnoMate logos
+        for p in ("logos/MicroSentryAI.png", "logos/MicroSentryAI.ico", "logos/AnnoMate.png"):
+            fp = os.path.join(project_root, p)
+            if os.path.exists(fp):
+                self.icon_path = fp
+                self.setWindowIcon(QIcon(fp))
+                break
 
     def _init_ui(self):
         """Orchestrates layout construction and component registration."""
@@ -475,25 +431,8 @@ class MicroSentryWindow(QMainWindow):
 
         self._connect_signals()
         self._setup_shortcuts()
-        self._set_window_icon()
-
-    def _set_window_icon(self):
-        """Resolves filesystem paths to locate application branding."""
-        d = os.path.dirname(os.path.abspath(__file__))
-        self.icon_path = None
-        for _ in range(5):
-            possible_logos = os.path.join(d, "logos")
-            if os.path.isdir(possible_logos):
-                for name in ["MicroSentryAI.png", "MicroSentryAI.ico"]:
-                    full_path = os.path.join(possible_logos, name)
-                    if os.path.exists(full_path):
-                        self.icon_path = full_path
-                        self.setWindowIcon(QIcon(full_path))
-                        return
-            d = os.path.dirname(d)
 
     def _setup_toolbar(self):
-        """Constructs the primary control rows for parameter tuning and file I/O."""
         row1 = QWidget()
         row1_layout = QHBoxLayout(row1)
         row1_layout.setContentsMargins(5, 5, 5, 0)
@@ -575,7 +514,6 @@ class MicroSentryWindow(QMainWindow):
         self.left_layout.addWidget(row2)
 
     def _setup_canvas_area(self):
-        """Initializes the dual QGraphicsView system and connects synchronization signals."""
         center = QWidget()
         grid = QGridLayout(center)
         
@@ -603,7 +541,6 @@ class MicroSentryWindow(QMainWindow):
         self.left_layout.addWidget(center, stretch=1)
 
     def _setup_bottom_bar(self):
-        """Constructs navigation controls and status indicators."""
         bottom = QWidget()
         bottom_layout = QHBoxLayout(bottom)
         
@@ -628,11 +565,9 @@ class MicroSentryWindow(QMainWindow):
         self.left_layout.addWidget(bottom)
 
     def on_heat_threshold_change(self, v: int):
-        """Updates threshold label and triggers heatmap re-rendering."""
         self.render_current_images(push_undo=False)
 
     def _setup_sidebar(self):
-        """Configures the wrapping table widget for dataset navigation."""
         self.right_layout.setContentsMargins(0, 0, 0, 0)
         self.right_layout.addWidget(QLabel("Dataset"))
         
@@ -649,7 +584,6 @@ class MicroSentryWindow(QMainWindow):
         self.right_layout.addWidget(self.table)
 
     def _connect_signals(self):
-        """Maps interactive UI elements to application logic methods."""
         self.btn_load_model.clicked.connect(self.load_model_clicked)
         self.btn_load_images.clicked.connect(self.load_images_clicked)
         self.btn_send_annot.clicked.connect(self.send_annotations)
@@ -667,7 +601,6 @@ class MicroSentryWindow(QMainWindow):
         self.btn_simpl_all.clicked.connect(self.simplify_all)
 
     def _setup_shortcuts(self):
-        """Registers standard keyboard sequences for common operations."""
         QShortcut(QKeySequence('Ctrl+Z'), self, activated=self.undo)
         QShortcut(QKeySequence('Ctrl+Y'), self, activated=self.redo)
         QShortcut(QKeySequence('S'), self, activated=self.simplify_selected_shortcut)
@@ -675,7 +608,6 @@ class MicroSentryWindow(QMainWindow):
     # --- DATASET MANAGEMENT ---
 
     def _is_processed(self, idx: int) -> bool:
-        """Determines if the image at index has cached inference results."""
         if 0 <= idx < len(self.image_files):
             return self.image_files[idx] in self.inference_cache
         return False
@@ -684,13 +616,11 @@ class MicroSentryWindow(QMainWindow):
         return "Processed" if self._is_processed(i) else "Pending"
 
     def _status_brush(self, i: int) -> QBrush:
-        """Returns color theme for table status based on processing state."""
         if self._is_processed(i):
             return QBrush(QColor(210, 245, 210))
         return QBrush(QColor(255, 235, 210))
 
     def _build_table(self):
-        """Populates the dataset table based on the current image file list."""
         n = len(self.image_files)
         self.table.setRowCount(n)
         for i in range(n):
@@ -698,7 +628,6 @@ class MicroSentryWindow(QMainWindow):
         self.table.resizeRowsToContents()
 
     def _update_table_row(self, i: int):
-        """Updates individual row metadata and styling."""
         if 0 <= i < self.table.rowCount():
             stem = Path(self.image_files[i]).stem
             
@@ -714,11 +643,9 @@ class MicroSentryWindow(QMainWindow):
             self.table.setItem(i, 1, status_item)
 
     def goto_index(self, idx: int):
-        """Transitions application state to focus on a specific image index."""
         if not self.image_files:
             return
         
-        # If we are strictly already at this index (and it wasn't a forced -1 reset), skip
         if idx == self.idx and idx != -1:
             return
 
@@ -734,26 +661,20 @@ class MicroSentryWindow(QMainWindow):
     # --- FILE I/O ---
 
     def load_model_clicked(self):
-        """
-        Loads exported weights via AnomalibStrategy. 
-        Supports PyTorch (.pt) and OpenVINO (.xml) formats.
-        """
+        """Loads exported weights via AnomalibStrategy (PyTorch only)."""
         file_path, _ = QFileDialog.getOpenFileName(
             self, 
             "Select Exported Model", 
             "", 
-            "Anomalib Models (*.pt *.xml)"
+            "PyTorch Models (*.pt *.ckpt)"
         )
         
         if not file_path:
             return
         
         try:
-            if file_path.endswith(".xml"):
-                devices = ["CPU", "GPU", "AUTO"]
-            else:
-                devices = ["auto", "cpu", "cuda", "mps"]
-                
+            # Device Selection
+            devices = ["auto", "cpu", "cuda", "mps"]
             device, ok = QInputDialog.getItem(
                 self, "Select Device", "Inference Hardware:", devices, 0, False
             )
@@ -772,8 +693,20 @@ class MicroSentryWindow(QMainWindow):
             self.model_label.setStyleSheet("font-weight: bold; color: #538A3F;")
             self.status.showMessage("Model Loaded Successfully")
             
+            # --- NEW FEATURE: Success Popup ---
+            QMessageBox.information(
+                self, 
+                "Model Loaded Successfully", 
+                f"The model was successfully loaded and initialized!\n\n"
+                f"Details: {strategy.model_name}"
+            )
+            
             if self.image_files:
                 self.inference_cache = {}
+                
+                # --- BUG FIX: Force the table to visually update to "Pending" ---
+                self._build_table() 
+                
                 self.start_background_inference()
                 self.process_image()
                 
@@ -782,7 +715,6 @@ class MicroSentryWindow(QMainWindow):
             self.status.showMessage("Error loading model")
 
     def load_images_clicked(self):
-        """Discovers compatible image assets in a user-selected directory."""
         folder = QFileDialog.getExistingDirectory(self, "Select Image Folder", "")
         if not folder:
             return
@@ -798,10 +730,8 @@ class MicroSentryWindow(QMainWindow):
         
         self._build_table()
         
-        # --- FIXED: Robustly trigger first-image loading ---
-        self.idx = -1  # Force reset so goto_index(0) always triggers
+        self.idx = -1 
         self.goto_index(0)
-        # ---------------------------------------------------
         
         self.folderLoaded.emit(folder, self.image_files)
         
@@ -811,7 +741,6 @@ class MicroSentryWindow(QMainWindow):
     # --- INFERENCE PIPELINE ---
 
     def start_background_inference(self):
-        """Initializes a background worker for batch prediction."""
         if not self.active_strategy or not self.image_files:
             return
         
@@ -836,7 +765,6 @@ class MicroSentryWindow(QMainWindow):
         self.worker.start()
 
     def on_worker_result(self, path: str, score_map: Any):
-        """Callback for individual image processing completion."""
         self.inference_cache[path] = score_map
         
         try:
@@ -856,7 +784,6 @@ class MicroSentryWindow(QMainWindow):
     # --- RENDERING & VISUALIZATION ---
 
     def process_image(self):
-        """Prepares a single image for display, executing model logic if not cached."""
         if not self.image_files:
             return
             
@@ -867,7 +794,6 @@ class MicroSentryWindow(QMainWindow):
             if path in self.inference_cache:
                 self.score_map = self.inference_cache[path]
             elif self.active_strategy:
-                # Synchronous fallback for immediate viewing
                 _, self.score_map = self.active_strategy.predict(path)
                 self.inference_cache[path] = self.score_map
                 self._update_table_row(self.idx)
@@ -884,7 +810,6 @@ class MicroSentryWindow(QMainWindow):
             QMessageBox.critical(self, "Inference Error", f"Failed to process {path}:\n{e}")
 
     def render_current_images(self, push_undo: bool = False):
-        """Unified rendering entry point for scene updates."""
         if self.orig_full is None:
             return
 
@@ -914,12 +839,10 @@ class MicroSentryWindow(QMainWindow):
         self.refresh_view()
 
     def _render_heatmap_and_polygons(self, disp_image: Image.Image, target_size: int):
-        """Generates heatmap overlays and derived polygons from raw anomaly scores."""
         s = self.score_map
         if self.sigma > 0:
             s = gaussian_filter(s, sigma=self.sigma)
             
-        # Normalization and visualization clipping
         v_percentile = float(self.heat_thresh_spin.value())
         v_min_thr = np.percentile(s, v_percentile)
         
@@ -930,7 +853,6 @@ class MicroSentryWindow(QMainWindow):
         w_disp, h_disp = disp_image.size
         s_norm_resized = cv2.resize(s_norm, (w_disp, h_disp), interpolation=cv2.INTER_LINEAR)
         
-        # Colorize
         heat_img_arr = (s_norm_resized * 255).astype(np.uint8)
         colored = (mpl_cmaps["jet"](heat_img_arr / 255.0) * 255).astype(np.uint8)
         
@@ -943,7 +865,6 @@ class MicroSentryWindow(QMainWindow):
         final_right = Image.alpha_composite(comp, overlay).convert("RGB")
         self.scene_right.addItem(QGraphicsPixmapItem(pil_to_qpixmap(final_right)))
         
-        # Segmentation logic
         percentile = float(self.slider.value())
         self.slider_label.setText(f"Percentile Threshold: {percentile:.1f}")
         seg_thr = np.percentile(s, percentile)
@@ -992,12 +913,10 @@ class MicroSentryWindow(QMainWindow):
         self.render_current_images(push_undo=False)
 
     def _sync_views(self, target_view, rx, ry, scale):
-        """Propagates spatial changes to a target view."""
         target_view.set_view_state(rx, ry, scale)
         self.viewChanged.emit(rx, ry, scale)
 
     def refresh_view(self):
-        """Force-synchronizes canvas zoom levels and centered alignment."""
         if self.scene_left.itemsBoundingRect().width() > 0:
             self.view_left.resetTransform()
             self.view_left.fitInView(self.scene_left.sceneRect(), Qt.KeepAspectRatio)
@@ -1027,7 +946,6 @@ class MicroSentryWindow(QMainWindow):
     # --- MEMENTO PATTERN (UNDO/REDO) ---
 
     def serialize_polygons(self):
-        """Converts scene items into a JSON-serializable state representation."""
         polys = []
         for item in self.scene_left.items():
             if isinstance(item, SegPathItem):
@@ -1037,7 +955,6 @@ class MicroSentryWindow(QMainWindow):
         return polys
 
     def restore_polygons(self, polys: List[Dict]):
-        """Reconstructs scene state from a serialized representation."""
         self.scene_left.clear()
         if self.orig_full:
             target = int(self.display_target)
@@ -1058,7 +975,6 @@ class MicroSentryWindow(QMainWindow):
             self.scene_left.addItem(item)
 
     def push_undo_state(self):
-        """Saves current state to the undo stack."""
         if self._block_history:
             return
         self.undo_stack.append(self.serialize_polygons())
@@ -1069,7 +985,6 @@ class MicroSentryWindow(QMainWindow):
             self.push_undo_state()
 
     def undo(self):
-        """Reverts to the previous state in the history stack."""
         if not self.undo_stack:
             return
         self._block_history = True
@@ -1082,7 +997,6 @@ class MicroSentryWindow(QMainWindow):
             self._block_history = False
 
     def redo(self):
-        """Advances to the next state in the history stack."""
         if not self.redo_stack:
             return
         self._block_history = True
@@ -1095,7 +1009,6 @@ class MicroSentryWindow(QMainWindow):
             self._block_history = False
 
     def keyPressEvent(self, event):
-        """Handles keyboard-based transformations and item deletions."""
         if event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
             self.push_undo_state()
             for item in list(self.scene_left.selectedItems()):
@@ -1118,7 +1031,6 @@ class MicroSentryWindow(QMainWindow):
         self.simplify_selected()
 
     def simplify_selected(self):
-        """Reduces complexity for currently selected SegPathItems."""
         eps = float(self.eps_spin.value())
         self.push_undo_state()
         for item in self.scene_left.selectedItems():
@@ -1126,7 +1038,6 @@ class MicroSentryWindow(QMainWindow):
                 item.simplify(eps)
 
     def simplify_all(self):
-        """Reduces complexity for all SegPathItems in the scene."""
         eps = float(self.eps_spin.value())
         self.push_undo_state()
         for item in self.scene_left.items():
@@ -1134,12 +1045,6 @@ class MicroSentryWindow(QMainWindow):
                 item.simplify(eps)
 
     def send_annotations(self):
-        """
-        Calculates and emits original-coordinate polygons.
-        
-        Applies inverse spatial transformations to convert canvas-space points 
-        back to high-resolution source image coordinates.
-        """
         selected_only = len(self.scene_left.selectedItems()) > 0
         items_to_send = self.scene_left.selectedItems() if selected_only else self.scene_left.items()
         
@@ -1167,17 +1072,3 @@ class MicroSentryWindow(QMainWindow):
             return
             
         self.polygonsSent.emit(polys_to_send, "Anomaly")
-
-    def mousePressEvent(self, event: QMouseEvent):
-        super().mousePressEvent(event)
-        for item in self.scene_left.items():
-            if isinstance(item, SegPathItem):
-                item.set_selected(item.isSelected())
-
-
-if __name__ == "__main__":
-    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
-    app = QApplication(sys.argv)
-    w = MicroSentryWindow()
-    w.show()
-    sys.exit(app.exec_())

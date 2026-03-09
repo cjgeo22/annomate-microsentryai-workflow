@@ -5,11 +5,6 @@ This module defines the `ImageLabel` class, a custom PyQt5 widget that handles:
 1.  Displaying images with high-performance zooming and panning.
 2.  Interactive polygon annotation (drawing, canceling, finishing).
 3.  Rendering overlays (existing annotations) on top of the image.
-
-Coordinate Systems:
--   **Original:** The actual pixel coordinates of the source image.
--   **Display:** Coordinates scaled to fit the base view (before zoom).
--   **View:** The final widget coordinates (after zoom/pan transformations).
 """
 
 from typing import List, Tuple, Optional
@@ -37,105 +32,38 @@ POLYGON = "polygon"
 
 
 class ImageLabel(QLabel):
-    """
-    A custom canvas widget for image annotation.
-
-    Features:
-    -   Zooming (Mouse Wheel) and Panning (Right-Click Drag).
-    -   Polygon drawing tool with vertex snapping.
-    -   Visualizing existing annotations as overlays.
-    """
-
     def __init__(self, parent=None):
-        """Initialize the widget and internal state."""
         super().__init__(parent)
         self.setMouseTracking(True)
         self.setScaledContents(False)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.setFocusPolicy(Qt.StrongFocus)  # Allow widget to catch Key_Escape
 
-        # External Dependencies
-        self.main_window = None  # Reference to main window for callbacks
-
-        # Tool State
+        self.main_window = None 
         self.current_tool: Optional[str] = None
         self._active_color = QColor(0, 200, 0)
 
-        # Image Data
         self._orig_image_bgr: Optional[np.ndarray] = None
         self._display_qpix: Optional[QPixmap] = None
 
-        # Transformation State
-        self._base_scale = 1.0  # Scale factor to fit image to screen initially
-        self._zoom = 1.0        # Dynamic zoom factor (multiplied by base_scale)
+        self._base_scale = 1.0  
+        self._zoom = 1.0        
         self._pan = QPointF(0, 0)
 
-        # Interaction State
         self._panning = False
         self._last_mouse_pos: Optional[QPointF] = None
         self._mouse_pos: Optional[QPointF] = None
 
-        # Annotation State (Stored in Display Coordinates)
         self.current_polygon_points: List[QPointF] = []
-        # Overlays: List of (List[QPointF], QColor)
         self._overlays: List[Tuple[List[QPointF], QColor]] = []
-
-    # =========================================================================
-    # Public API (Hooks for Window)
-    # =========================================================================
-
-    def set_main_window(self, main_window):
-        """Sets the reference to the parent main window."""
-        self.main_window = main_window
-
-    def set_tool(self, tool_name: Optional[str]):
-        """Sets the active drawing tool (e.g., POLYGON or None)."""
-        self.current_tool = tool_name
-
-    def set_active_color(self, color: QColor):
-        """Sets the color for the currently active drawing tool."""
-        self._active_color = color if isinstance(color, QColor) else QColor(0, 200, 0)
-
-    def set_overlays(self, poly_list: List[Tuple[List[Tuple[float, float]], QColor]]):
-        """
-        Updates the list of static overlays to draw (existing annotations).
-
-        Args:
-            poly_list: A list of tuples, where each tuple contains:
-                       1. A list of (x, y) coordinates in ORIGINAL image space.
-                       2. A QColor object for filling the polygon.
-        """
-        self._overlays = []
-        for pts_orig, color in poly_list:
-            # Transform original coordinates to display coordinates for rendering
-            disp_pts = [
-                QPointF(x * self._base_scale, y * self._base_scale)
-                for (x, y) in pts_orig
-            ]
-            self._overlays.append((disp_pts, color))
-        self.update()
-
-    def clear_current_polygon(self):
-        """Aborts the current drawing operation."""
-        self.current_polygon_points.clear()
-        self.update()
-
-    # =========================================================================
-    # Image Loading & Coordinate Math
-    # =========================================================================
+        
+        # --- UI State Trackers ---
+        self.selected_polygon_idx: int = -1  
+        self.editing_polygon_idx: int = -1   
+        self.dragging_vertex_idx: int = -1   
+        self._dragging_polygon: bool = False 
 
     def load_image(self, path: str, max_display_dim: int = 1200):
-        """
-        Loads an image from disk and prepares it for display.
-
-        Args:
-            path (str): File path to the image.
-            max_display_dim (int): Maximum dimension (width or height) for the
-                                   internal display pixmap. Large images are
-                                   downscaled for performance.
-
-        Raises:
-            RuntimeError: If the image cannot be loaded via OpenCV.
-        """
         bgr = cv2.imread(path, cv2.IMREAD_COLOR)
         if bgr is None:
             raise RuntimeError(f"Failed to load image: {path}")
@@ -143,17 +71,14 @@ class ImageLabel(QLabel):
         self._orig_image_bgr = bgr
         h, w = bgr.shape[:2]
 
-        # Calculate base scale to fit within max_display_dim
         self._base_scale = (
             1.0 if max(h, w) <= max_display_dim
             else max_display_dim / float(max(h, w))
         )
 
-        # Reset View
         self._zoom = 1.0
         self._pan = QPointF(0, 0)
 
-        # Create resized display pixmap
         new_w = int(w * self._base_scale)
         new_h = int(h * self._base_scale)
         
@@ -161,10 +86,8 @@ class ImageLabel(QLabel):
             bgr, (new_w, new_h), interpolation=cv2.INTER_AREA
         )
         
-        # Convert BGR (OpenCV) to RGB (Qt)
         rgb = cv2.cvtColor(resized_bgr, cv2.COLOR_BGR2RGB)
         
-        # Create QImage and QPixmap
         qimg = QImage(
             rgb.data,
             rgb.shape[1],
@@ -174,35 +97,90 @@ class ImageLabel(QLabel):
         )
         self._display_qpix = QPixmap.fromImage(qimg)
 
-        # Clear state
+        # --- Reset all tracking states on new image ---
         self.clear_current_polygon()
         self._overlays = []
+        self.selected_polygon_idx = -1
+        self.editing_polygon_idx = -1   
+        self.dragging_vertex_idx = -1   
+        self._dragging_polygon = False  
+        
+        self.update()
+
+    def set_main_window(self, main_window):
+        self.main_window = main_window
+
+    def set_tool(self, tool_name: Optional[str]):
+        self.current_tool = tool_name
+
+    def set_active_color(self, color: QColor):
+        self._active_color = color if isinstance(color, QColor) else QColor(0, 200, 0)
+
+    def set_overlays(self, poly_list: List[Tuple[List[Tuple[float, float]], QColor]]):
+        self._overlays = []
+        for pts_orig, color in poly_list:
+            disp_pts = [
+                QPointF(x * self._base_scale, y * self._base_scale)
+                for (x, y) in pts_orig
+            ]
+            self._overlays.append((disp_pts, color))
+        self.update()
+
+    def clear_current_polygon(self):
+        self.current_polygon_points.clear()
+        self.update()
+
+    def load_image(self, path: str, max_display_dim: int = 1200):
+        bgr = cv2.imread(path, cv2.IMREAD_COLOR)
+        if bgr is None:
+            raise RuntimeError(f"Failed to load image: {path}")
+
+        self._orig_image_bgr = bgr
+        h, w = bgr.shape[:2]
+
+        self._base_scale = (
+            1.0 if max(h, w) <= max_display_dim
+            else max_display_dim / float(max(h, w))
+        )
+
+        self._zoom = 1.0
+        self._pan = QPointF(0, 0)
+
+        new_w = int(w * self._base_scale)
+        new_h = int(h * self._base_scale)
+        
+        resized_bgr = cv2.resize(
+            bgr, (new_w, new_h), interpolation=cv2.INTER_AREA
+        )
+        
+        rgb = cv2.cvtColor(resized_bgr, cv2.COLOR_BGR2RGB)
+        
+        qimg = QImage(
+            rgb.data,
+            rgb.shape[1],
+            rgb.shape[0],
+            rgb.strides[0],
+            QImage.Format_RGB888
+        )
+        self._display_qpix = QPixmap.fromImage(qimg)
+
+        self.clear_current_polygon()
+        self._overlays = []
+        self.selected_polygon_idx = -1
+        self.editing_polygon_idx = -1   
+        self.dragging_vertex_idx = -1  
         self.update()
 
     def view_to_display(self, p_view: QPointF) -> QPointF:
-        """
-        Transforms a point from View coordinates (Widget pixels) to
-        Display coordinates (Scaled image pixels).
-        """
         return QPointF(
             (p_view.x() - self._pan.x()) / self._zoom,
             (p_view.y() - self._pan.y()) / self._zoom
         )
 
     def display_to_original(self, p_disp: QPointF) -> Tuple[float, float]:
-        """
-        Transforms a point from Display coordinates to Original image coordinates.
-        """
         return (p_disp.x() / self._base_scale, p_disp.y() / self._base_scale)
 
-    # =========================================================================
-    # Polygon Logic
-    # =========================================================================
-
     def maybe_close_on_first_vertex(self, pos_view: QPointF, thresh_px: float = 8.0) -> bool:
-        """
-        Checks if the mouse click is close enough to the starting vertex to close the polygon.
-        """
         if len(self.current_polygon_points) < 3:
             return False
             
@@ -216,12 +194,7 @@ class ImageLabel(QLabel):
         return distance <= thresh_px
 
     def finish_current_polygon(self):
-        """
-        Finalizes the polygon, converts points to original coordinates, and
-        notifies the main window.
-        """
         if self.current_polygon_points and self.main_window is not None:
-            # Convert to original image coordinates for storage
             pts_orig = [
                 self.display_to_original(p) for p in self.current_polygon_points
             ]
@@ -230,95 +203,224 @@ class ImageLabel(QLabel):
         self.current_polygon_points.clear()
         self.update()
 
-    # =========================================================================
-    # Input Event Handlers
-    # =========================================================================
-
     def keyPressEvent(self, event: QKeyEvent):
-        """Handles keyboard shortcuts (Backspace to undo, Esc to cancel)."""
+        if event.key() == Qt.Key_Escape:
+            self.clear_current_polygon()
+            self.set_tool(None)
+            if self.main_window:
+                self.main_window.btn_poly.setChecked(False)
+            return
+
         if self.current_tool == POLYGON and self.current_polygon_points:
             if event.key() == Qt.Key_Backspace:
                 self.current_polygon_points.pop()
                 self.update()
                 return
-            if event.key() == Qt.Key_Escape:
-                self.current_polygon_points.clear()
-                self.update()
-                return
         super().keyPressEvent(event)
 
     def mouseDoubleClickEvent(self, event: QMouseEvent):
-        """Double-click closes the polygon."""
         if self.current_tool == POLYGON and self.current_polygon_points:
             self.finish_current_polygon()
             return
+        
+         # --- NEW: Double Click to Edit ---
+        if event.button() == Qt.LeftButton:
+            pos_disp = self.view_to_display(QPointF(event.pos()))
+            found_idx = -1
+            for i, (pts, _) in enumerate(reversed(self._overlays)):
+                if QPolygonF(pts).containsPoint(pos_disp, Qt.OddEvenFill):
+                    found_idx = len(self._overlays) - 1 - i
+                    break
+
+            if found_idx != -1:
+                self.editing_polygon_idx = found_idx
+                self.selected_polygon_idx = found_idx
+                if self.main_window and hasattr(self.main_window, 'on_polygon_selected'):
+                    self.main_window.on_polygon_selected(found_idx)
+                self.update()
+                return
+            
         super().mouseDoubleClickEvent(event)
 
     def mousePressEvent(self, event: QMouseEvent):
-        """Handles drawing (Left Click) and Panning (Right Click)."""
-        if event.button() == Qt.LeftButton and self.current_tool == POLYGON:
-            # Check if clicking near start to close loop
-            if self.maybe_close_on_first_vertex(event.pos()):
-                self.finish_current_polygon()
-            else:
-                # Add new vertex
-                self.current_polygon_points.append(self.view_to_display(event.pos()))
-                self.update()
+        self.setFocus()  
+        
+        if event.button() == Qt.LeftButton:
+            pos_view = QPointF(event.pos())
+            pos_disp = self.view_to_display(pos_view)
+
+            # --- PRE-CHECK: Identify if we clicked inside any existing polygon ---
+            found_idx = -1
+            for i, (pts, _) in enumerate(reversed(self._overlays)):
+                if QPolygonF(pts).containsPoint(pos_disp, Qt.OddEvenFill):
+                    found_idx = len(self._overlays) - 1 - i
+                    break
+
+            # 1. Edit Mode: Vertex Dragging & Polygon Dragging
+            if self.editing_polygon_idx != -1:
+                pts, _ = self._overlays[self.editing_polygon_idx]
+                closest_idx = -1
+                min_dist = float('inf')
+                
+                for i, p_disp in enumerate(pts):
+                    p_view = QPointF(
+                        p_disp.x() * self._zoom + self._pan.x(),
+                        p_disp.y() * self._zoom + self._pan.y()
+                    )
+                    dist = ((p_view.x() - pos_view.x())**2 + (p_view.y() - pos_view.y())**2)**0.5
+                    if dist < 10.0 and dist < min_dist:
+                        min_dist = dist
+                        closest_idx = i
+                
+                if closest_idx != -1:
+                    self.dragging_vertex_idx = closest_idx
+                    return
+
+                if QPolygonF(pts).containsPoint(pos_disp, Qt.OddEvenFill):
+                    self._dragging_polygon = True
+                    self._last_mouse_pos = pos_view
+                    return
+                else:
+                    self.editing_polygon_idx = -1
+                    self.setCursor(Qt.ArrowCursor)
+                    self.update()
+                    
+            # 2. Normal Polygon Drawing
+            if self.current_tool == POLYGON:
+                # Visually highlight the polygon we clicked on, even while drawing
+                if not self.current_polygon_points:
+                    self.selected_polygon_idx = found_idx
+                    if self.main_window and hasattr(self.main_window, 'on_polygon_selected'):
+                        self.main_window.on_polygon_selected(found_idx)
+                
+                if self.maybe_close_on_first_vertex(QPointF(event.pos())):
+                    self.finish_current_polygon()
+                else:
+                    self.current_polygon_points.append(self.view_to_display(QPointF(event.pos())))
+                    self.update()
+                return
+
+            # 3. Normal Selection & Polygon Dragging (When Polygon Tool is OFF)
+            self.selected_polygon_idx = found_idx
+            self.update()
+            if self.main_window and hasattr(self.main_window, 'on_polygon_selected'):
+                self.main_window.on_polygon_selected(found_idx)
+            
+            if found_idx != -1:
+                self._dragging_polygon = True
+                self._last_mouse_pos = pos_view
                 
         elif event.button() == Qt.RightButton:
-            # Start Pan
             self._panning = True
-            self._last_mouse_pos = event.pos()
+            self._last_mouse_pos = QPointF(event.pos())
 
     def mouseMoveEvent(self, event: QMouseEvent):
-        """Handles mouse movement for panning and drawing guides."""
-        self._mouse_pos = event.pos()
+        self._mouse_pos = QPointF(event.pos())
         
+        # --- NEW: Live update vertex while dragging ---
+        if self.dragging_vertex_idx != -1 and self.editing_polygon_idx != -1:
+            new_pos = self.view_to_display(self._mouse_pos)
+            pts, _ = self._overlays[self.editing_polygon_idx]
+            pts[self.dragging_vertex_idx] = new_pos
+            self.update()
+            return
+
+        # --- NEW: Drag entire polygon ---
+        if self._dragging_polygon and self.selected_polygon_idx != -1 and self._last_mouse_pos is not None:
+            delta_view = self._mouse_pos - self._last_mouse_pos
+            delta_disp = QPointF(delta_view.x() / self._zoom, delta_view.y() / self._zoom)
+            
+            pts, _ = self._overlays[self.selected_polygon_idx]
+            for i in range(len(pts)):
+                pts[i] = QPointF(pts[i].x() + delta_disp.x(), pts[i].y() + delta_disp.y())
+            
+            self._last_mouse_pos = self._mouse_pos
+            self.update()
+            return
+            
         if self._panning and self._last_mouse_pos is not None:
-            delta = event.pos() - self._last_mouse_pos
+            delta = self._mouse_pos - self._last_mouse_pos
             self._pan += delta
-            self._last_mouse_pos = event.pos()
+            self._last_mouse_pos = self._mouse_pos
             self.update()
             return
             
         if self.current_tool == POLYGON and self.current_polygon_points:
-            self.update()  # Redraw to show guide line
+            self.update()  
             return
+            
+        # --- NEW: Hover detection for precision cursor ---
+        if self.editing_polygon_idx != -1 and not self._dragging_polygon and not self._panning:
+            pts, _ = self._overlays[self.editing_polygon_idx]
+            hovering = False
+            for p_disp in pts:
+                p_view = QPointF(
+                    p_disp.x() * self._zoom + self._pan.x(),
+                    p_disp.y() * self._zoom + self._pan.y()
+                )
+                dist = ((p_view.x() - self._mouse_pos.x())**2 + (p_view.y() - self._mouse_pos.y())**2)**0.5
+                if dist < 10.0:
+                    hovering = True
+                    break
+            
+            # Switch to thin crosshair if hovering, otherwise standard arrow
+            self.setCursor(Qt.CrossCursor if hovering else Qt.ArrowCursor)
             
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent):
-        """Ends panning operation."""
+        if event.button() == Qt.LeftButton:
+            # Commit Vertex Drag
+            if self.dragging_vertex_idx != -1:
+                if self.main_window and hasattr(self.main_window, 'update_polygon_points'):
+                    pts, _ = self._overlays[self.editing_polygon_idx]
+                    pts_orig = [self.display_to_original(p) for p in pts]
+                    self.main_window.update_polygon_points(self.editing_polygon_idx, pts_orig)
+                self.dragging_vertex_idx = -1
+                return
+            
+            # Commit Polygon Drag
+            if self._dragging_polygon:
+                if self.main_window and hasattr(self.main_window, 'update_polygon_points'):
+                    pts, _ = self._overlays[self.selected_polygon_idx]
+                    pts_orig = [self.display_to_original(p) for p in pts]
+                    self.main_window.update_polygon_points(self.selected_polygon_idx, pts_orig)
+                self._dragging_polygon = False
+                self._last_mouse_pos = None
+                return
+
         if event.button() == Qt.RightButton:
             self._panning = False
             self._last_mouse_pos = None
 
     def wheelEvent(self, event: QWheelEvent):
-        """Handles zoom in/out."""
+        """Mathematically precise cursor-anchored zoom."""
         if self._display_qpix is None:
             return
 
-        # Calculate zoom factor
-        steps = event.angleDelta().y() / 120.0
+        delta = event.angleDelta().y()
+        if delta == 0:
+            return
+
+        # --- BUG FIX 1: Touchpad Sensitivity ---
+        steps = delta / 120.0
+        steps = max(-5.0, min(5.0, steps)) # Clamp extreme inputs
         factor = 1.15 ** steps
+
+        # --- BUG FIX 2: Order of Operations for Cursor Anchor ---
+        # We MUST calculate the original point under the cursor BEFORE updating the zoom!
+        cursor_pos = QPointF(event.pos())
+        point_in_disp = self.view_to_display(cursor_pos)
         
         old_zoom = self._zoom
         self._zoom = max(0.2, min(8.0, old_zoom * factor))
 
-        # Adjust pan to zoom towards mouse cursor
-        cursor_pos = event.pos()
-        point_in_disp = self.view_to_display(cursor_pos)
-        
-        # New Pan = Cursor - (PointInDisp * NewZoom)
+        # Now update pan so that 'point_in_disp' remains exactly under 'cursor_pos'
         self._pan = QPointF(
             cursor_pos.x() - point_in_disp.x() * self._zoom,
             cursor_pos.y() - point_in_disp.y() * self._zoom,
         )
         self.update()
-
-    # =========================================================================
-    # View Control Helpers
-    # =========================================================================
 
     def zoom_in(self):
         self._apply_zoom(1.15)
@@ -332,7 +434,7 @@ class ImageLabel(QLabel):
         self.update()
 
     def _apply_zoom(self, factor: float):
-        """Helper to apply zoom relative to the center of the widget."""
+        """Button-based zoom targeted precisely at the center of the widget."""
         if self._display_qpix is None:
             return
             
@@ -347,41 +449,39 @@ class ImageLabel(QLabel):
         )
         self.update()
 
-    # =========================================================================
-    # Painting
-    # =========================================================================
-
     def paintEvent(self, event: QPaintEvent):
-        """Draws the image, overlays, and active polygon."""
         painter = QPainter(self)
         if self._display_qpix is None:
             return
 
-        # Apply View Transformations
         painter.translate(self._pan)
         painter.scale(self._zoom, self._zoom)
-        
-        # Draw Background Image
         painter.drawPixmap(0, 0, self._display_qpix)
 
-        # Draw Overlays (Existing Annotations)
-        # Format: Faint fill + solid outline
-        for pts, color in self._overlays:
+        # Draw Overlays with Selection Highlighting
+        for i, (pts, color) in enumerate(self._overlays):
             if len(pts) >= 2:
-                painter.setPen(QPen(color, 2))
-                painter.setBrush(QBrush(QColor(color.red(), color.green(), color.blue(), 60)))
+                is_selected = (i == self.selected_polygon_idx)
+                pen = QPen(color, 4 if is_selected else 2) # Thicker if selected
+                alpha = 150 if is_selected else 60         # Darker fill if selected
+                
+                painter.setPen(pen)
+                painter.setBrush(QBrush(QColor(color.red(), color.green(), color.blue(), alpha)))
                 painter.drawPolygon(QPolygonF(pts + [pts[0]]))
+                # --- NEW: Draw Editing Handles ---
+                if i == self.editing_polygon_idx:
+                    # Scale handles so they don't get tiny when zoomed out
+                    r = max(4.0 / self._zoom, 1.0) 
+                    painter.setBrush(QBrush(QColor("#FFEB3B"))) 
+                    painter.setPen(QPen(QColor(20, 20, 20), 1))
+                    for p in pts:
+                        painter.drawEllipse(p, r, r)
 
-        # Draw Active Polygon (Being drawn now)
-        # Format: Outline only + Guide line to cursor
         if self.current_tool == POLYGON and self.current_polygon_points:
             painter.setBrush(Qt.NoBrush)
             painter.setPen(QPen(self._active_color, 2))
-            
-            # Draw existing vertices
             painter.drawPolyline(QPolygonF(self.current_polygon_points))
             
-            # Draw "Rubber band" line to mouse cursor
             if self._mouse_pos:
                 cursor_in_disp = self.view_to_display(self._mouse_pos)
                 painter.drawLine(
