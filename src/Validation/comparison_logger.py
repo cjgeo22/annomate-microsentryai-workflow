@@ -1,23 +1,34 @@
+"""
+Comparison Logger Module.
+
+Provides text-based logging utilities to record the statistical 
+output of the MaskComparator for historical auditing.
+"""
+
 import time
-import argparse
 from typing import Dict, Any, TextIO, Tuple
+
 
 def write_log_header(
     f: TextIO, 
-    args: argparse.Namespace, 
-    gt_outline_bgr: Tuple[int, int, int]
+    gt_dir: str,
+    pred_dir: str,
+    out_dir: str,
+    gt_outline_bgr: Tuple[int, int, int],
+    thickness: int
 ):
     """Writes the standardized header information to the log file."""
     log_timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
     
     f.write(f"=================================================\n")
     f.write(f"MASK COMPARISON LOG: {log_timestamp}\n")
-    f.write(f"Ground Truth Dir: {args.ground_truth_dir}\n")
-    f.write(f"Prediction Dir:   {args.prediction_dir}\n")
-    f.write(f"Output Dir:       {args.output_dir}\n")
-    f.write(f"Outline Color:    {args.gt_outline_color} (BGR: {gt_outline_bgr})\n")
-    f.write(f"Outline Thickness: {args.gt_outline_thickness}\n")
+    f.write(f"Ground Truth Dir: {gt_dir}\n")
+    f.write(f"Prediction Dir:   {pred_dir}\n")
+    f.write(f"Output Dir:       {out_dir}\n")
+    f.write(f"Outline Color:    BGR {gt_outline_bgr}\n")
+    f.write(f"Outline Thickness: {thickness}\n")
     f.write(f"=================================================\n\n")
+
 
 def log_results(f: TextIO, relative_path: str, metrics: Dict[str, Any]):
     """Writes the comparison metrics for a single file to the log."""
@@ -35,6 +46,7 @@ def log_results(f: TextIO, relative_path: str, metrics: Dict[str, Any]):
         f.write(f"  Centroid Distance (Euclidean): {distance:.2f} px\n\n")
     else:
         f.write(f"  Centroid Distance (Euclidean): N/A (One or both masks empty)\n\n")
+
 
 def log_skip(f: TextIO, relative_path: str, reason: str):
     """Logs a skipped file with a specific reason."""

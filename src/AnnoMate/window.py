@@ -9,10 +9,14 @@ class management, and synchronization with external tools (MicroSentry).
 import os
 import csv
 import json
+import logging
 import traceback
 from typing import Optional, List, Tuple, Dict, Any, Set
 from pathlib import Path
 from datetime import datetime
+
+# Third-party imports moved to top per PEP 8
+from PIL import Image, ImageDraw
 
 from PyQt5 import QtWidgets
 from PyQt5.QtWidgets import (
@@ -39,19 +43,13 @@ from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QBrush, QIcon, QPixmap
 
 # --- Local Imports ---
-# Using a try-except block to handle both package-relative and standalone execution
-try:
-    from .image_label import ImageLabel, POLYGON
-    from .utils import polygon_area
-    from .constants import DEFAULT_CLASS_COLORS
-    from .styles import MAIN_STYLESHEET, SPLITTER_STYLE
-    from .widgets import CustomSplitter, WrappingTableWidget
-except ImportError:
-    from image_label import ImageLabel, POLYGON
-    from utils import polygon_area
-    from constants import DEFAULT_CLASS_COLORS
-    from styles import MAIN_STYLESHEET, SPLITTER_STYLE
-    from widgets import CustomSplitter, WrappingTableWidget
+from .image_label import ImageLabel, POLYGON
+from .utils import polygon_area
+from .constants import DEFAULT_CLASS_COLORS
+from .styles import MAIN_STYLESHEET, SPLITTER_STYLE
+from .widgets import CustomSplitter, WrappingTableWidget
+
+logger = logging.getLogger(__name__)
 
 
 class ImageAnnotator(QMainWindow):
@@ -141,8 +139,8 @@ class ImageAnnotator(QMainWindow):
             try:
                 self.canvas.horizontalScrollBar().valueChanged.connect(self._emit_view_sync)
                 self.canvas.verticalScrollBar().valueChanged.connect(self._emit_view_sync)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Failed to hook scrollbars: {e}")
 
     def _setup_sidebar(self):
         """Initializes the right-hand sidebar with controls."""
@@ -295,7 +293,31 @@ class ImageAnnotator(QMainWindow):
         """Creates the list widget for annotations on the current image."""
         self.side_layout.addWidget(QLabel("Annotations (current image)"))
         self.ann_list = QListWidget()
+        self.ann_list.itemSelectionChanged.connect(self.on_ann_list_selection)
         self.side_layout.addWidget(self.ann_list, 1)
+
+    def on_ann_list_selection(self):
+        """Highlights the polygon on the canvas when clicked in the sidebar."""
+        idxs = self.selected_indices()
+        if idxs:
+            self.canvas.selected_polygon_idx = idxs[0]
+        else:
+            self.canvas.selected_polygon_idx = -1
+        self.canvas.update()
+
+    def on_polygon_selected(self, idx: int):
+        """Highlights the sidebar item when a polygon is clicked on the canvas."""
+        self.ann_list.blockSignals(True)
+        self.ann_list.clearSelection()
+        
+        if 0 <= idx < self.ann_list.count():
+            # setCurrentRow physically moves the UI focus and scrolls to the item
+            self.ann_list.setCurrentRow(idx)
+        else:
+            # Deselect everything if we clicked empty space
+            self.ann_list.setCurrentRow(-1)
+            
+        self.ann_list.blockSignals(False)
 
     def _create_ops_controls(self):
         """Creates operations buttons (Delete Selected, Sort)."""
@@ -332,25 +354,26 @@ class ImageAnnotator(QMainWindow):
     # --- Loading & Navigation ---
 
     def load_folder_programmatically(self, folder_path: str, files: List[str]):
-        """
-        Loads a specific folder and file list directly (used by MicroSentry sync).
-        CRITICAL: Converts absolute paths (from sync) to simple filenames to avoid
-        path duplication errors.
-        
-        Args:
-            folder_path (str): The absolute path to the directory.
-            files (List[str]): List of filenames or absolute paths.
-        """
+        """Loads a specific folder, clears old metadata, and resets the index."""
         if not folder_path or not files:
             return
         
-        self.image_dir = folder_path
+        # --- FIX: Purge Metadata on New Load ---
+        self.annotations.clear()
+        self.inspectors.clear()
+        self.notes.clear()
+        self._global_inspector = ""
+        self.inspector_edit.clear()
+        self.note_edit.clear()
         
-        # Ensure we only store filenames (e.g. "img.png"), not full paths.
+        self.image_dir = folder_path
         self.image_files = [Path(f).name for f in files]
         
         self.lbl_dir.setText(Path(folder_path).name)
         self._build_table()
+        
+        # --- FIX: Force current_idx reset so 0 always triggers an update ---
+        self.current_idx = -1
         self.goto_index(0)
 
     def open_folder_dialog(self):
@@ -366,11 +389,15 @@ class ImageAnnotator(QMainWindow):
         if not files:
             return
         
-        # Load locally
         self.load_folder_programmatically(directory, files)
-        
-        # Emit signal to sync external tabs (sending files as is; adapter handles them)
         self.folderLoaded.emit(directory, files)
+        
+        # --- FIX: User Feedback Dialog ---
+        QMessageBox.information(
+            self, 
+            "Folder Loaded", 
+            f"Successfully loaded {len(files)} image(s) from {Path(directory).name}."
+        )
 
     def open_folder(self):
         """Backward compatibility wrapper for open_folder_dialog."""
@@ -453,8 +480,8 @@ class ImageAnnotator(QMainWindow):
                 ry = (v_bar.value() + v_bar.pageStep() / 2) / v_max
                 
                 self.viewChanged.emit(rx, ry, scale)
-        except Exception:
-            pass
+        except AttributeError as e:
+            logger.debug(f"View sync skipped (canvas not fully initialized): {e}")
 
     def set_view_state(self, rx: float, ry: float, scale: float):
         """
@@ -473,8 +500,8 @@ class ImageAnnotator(QMainWindow):
                 
                 h_bar.setValue(h_target)
                 v_bar.setValue(v_target)
-        except Exception:
-            pass
+        except AttributeError as e:
+            logger.debug(f"Set view state skipped: {e}")
 
     # --- Annotation Logic ---
 
@@ -529,6 +556,17 @@ class ImageAnnotator(QMainWindow):
         self.refresh_overlays()
         self._update_table_row(self.current_idx)
 
+    def update_polygon_points(self, poly_idx: int, pts_orig: List[Tuple[float, float]]):
+        """Updates an existing polygon's coordinates after a vertex drag."""
+        if self.current_idx < 0 or not self.image_files:
+            return
+            
+        img = self.image_files[self.current_idx]
+        annos = self.annotations.get(img, [])
+        if 0 <= poly_idx < len(annos):
+            annos[poly_idx]["polygon"] = pts_orig
+            self.refresh_overlays(keep_selection=True)
+
     # --- Class Management ---
 
     def on_class_changed(self, name: str):
@@ -578,6 +616,12 @@ class ImageAnnotator(QMainWindow):
         # Remove annotations of this class from all images
         for img, ann_list in list(self.annotations.items()):
             self.annotations[img] = [a for a in ann_list if a.get("category_name") != name]
+        
+        # --- BUG FIX: Force the dataset table to update statuses for ALL images ---
+        # Because deleting a class might affect annotations on images other than 
+        # the current one, we refresh the UI status for the entire table.
+        for i in range(len(self.image_files)):
+            self._update_table_row(i)
         
         # Update UI
         idx = self.class_combo.currentIndex()
@@ -734,8 +778,13 @@ class ImageAnnotator(QMainWindow):
             it.setData(Qt.UserRole, a)
             self.ann_list.addItem(it)
 
-    def refresh_overlays(self):
+    def refresh_overlays(self, keep_selection: bool = False):
         """Pushes current annotations to the canvas for drawing."""
+        if not keep_selection:
+            self.canvas.selected_polygon_idx = -1 
+            if hasattr(self.canvas, 'editing_polygon_idx'):
+                self.canvas.editing_polygon_idx = -1
+                
         if self.current_idx < 0:
             self.canvas.set_overlays([])
             return
@@ -791,8 +840,6 @@ class ImageAnnotator(QMainWindow):
             "images": {}
         }
         
-        from PIL import Image, ImageDraw  # Local import to avoid global dependency if unused
-        
         saved_count = 0
         for name in self.image_files:
             anns = self.annotations.get(name, [])
@@ -840,7 +887,8 @@ class ImageAnnotator(QMainWindow):
                 out_name = f"{tray_name}_{Path(name).stem}_{timestamp}_poly.jpg"
                 composed.save(out_dir / out_name, "JPEG", quality=95)
                 saved_count += 1
-            except Exception:
+            except Exception as e:
+                logger.error(f"Failed to export overlay for {name}: {e}")
                 continue
             
         data_path = out_dir / f"{tray_name}_{timestamp}_data.json"
@@ -1019,5 +1067,41 @@ class ImageAnnotator(QMainWindow):
             try:
                 if not self.isMaximized():
                     self.showMaximized()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Failed to maximize window: {e}")
+
+    def keyPressEvent(self, event):
+        """Captures hotkeys for modifying the selected polygon."""
+        if event.key() == Qt.Key_BracketLeft:
+            self.scale_selected_polygon(0.9)
+        elif event.key() == Qt.Key_BracketRight:
+            self.scale_selected_polygon(1.1)
+        super().keyPressEvent(event)
+
+    def scale_selected_polygon(self, factor: float):
+        """Scales the currently selected polygon from its centroid."""
+        idx = self.canvas.selected_polygon_idx
+        if idx == -1 or self.current_idx < 0:
+            return
+            
+        img = self.image_files[self.current_idx]
+        annos = self.annotations.get(img, [])
+        
+        if 0 <= idx < len(annos):
+            pts = annos[idx]["polygon"]
+            if not pts:
+                return
+                
+            # Calculate Centroid (Center Point)
+            cx = sum(p[0] for p in pts) / len(pts)
+            cy = sum(p[1] for p in pts) / len(pts)
+            
+            # Scale all points relative to the centroid
+            new_pts = [
+                (cx + (p[0] - cx) * factor, cy + (p[1] - cy) * factor)
+                for p in pts
+            ]
+            
+            # Update data structure and canvas
+            annos[idx]["polygon"] = new_pts
+            self.refresh_overlays(keep_selection=True)

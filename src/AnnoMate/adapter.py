@@ -8,6 +8,7 @@ the AnnoMate logic and the parent application (main.py).
 """
 
 import os
+import logging
 from pathlib import Path
 from typing import List, Optional
 
@@ -25,6 +26,8 @@ from PyQt5.QtWidgets import (
 
 # Relative import to find window.py in the same package
 from .window import ImageAnnotator
+
+logger = logging.getLogger(__name__)
 
 
 class _KeyForwarder(QObject):
@@ -124,9 +127,8 @@ class AnnotatorTab(QWidget):
         try:
             abs_files = [str(Path(folder_path) / f) for f in files]
             self.folderChanged.emit(folder_path, abs_files)
-        except Exception:
-            # Fallback in case of path errors
-            pass
+        except (TypeError, ValueError) as e:
+            logger.error(f"Failed to process folder paths: {e}")
 
     def _setup_index_hooks(self):
         """
@@ -163,8 +165,9 @@ class AnnotatorTab(QWidget):
             button.clicked.disconnect()
         except TypeError:
             pass
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Disconnect failed for button: {e}")
+            
         button.clicked.connect(new_slot)
 
     # --- Public API for Parent App ---
@@ -195,8 +198,10 @@ class AnnotatorTab(QWidget):
             abs_files = [str(Path(folder_path) / f) for f in files]
             self.folderChanged.emit(folder_path, abs_files)
 
-        except Exception:
-            pass
+        except FileNotFoundError:
+            logger.warning(f"Directory not found: {folder_path}")
+        except PermissionError:
+            logger.error(f"Permission denied accessing: {folder_path}")
 
     def set_index(self, idx: int):
         """Sets the current image index programmatically."""
