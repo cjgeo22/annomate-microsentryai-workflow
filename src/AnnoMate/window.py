@@ -38,9 +38,6 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QColorDialog,
     QHeaderView,
-    QDialog,
-    QSlider,
-    QDialogButtonBox
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QBrush, QIcon, QPixmap
@@ -54,53 +51,6 @@ from .widgets import CustomSplitter, WrappingTableWidget
 
 logger = logging.getLogger(__name__)
 
-class SettingsDialog(QDialog):
-    """Dialog for adjusting application-wide settings like line thickness."""
-    def __init__(self, parent=None, current_thickness=2.0, target_idx=-1):
-        super().__init__(parent)
-        self.target_idx = target_idx # -1 means "Default Brush", >=0 means "Specific Polygon"
-        
-        layout = QVBoxLayout(self)
-        
-        # --- Thickness Control ---
-        thick_layout = QHBoxLayout()
-        thick_layout.addWidget(QLabel("Brush Thickness:"))
-        self.val_label = QLabel(f"{current_thickness:.2f} px")
-        thick_layout.addWidget(self.val_label)
-        thick_layout.addStretch()
-        layout.addLayout(thick_layout)
-        
-        # Slider configured in intervals of 1/4ths (0.25)
-        self.slider = QSlider(Qt.Horizontal)
-        self.slider.setMinimum(1)   
-        self.slider.setMaximum(40)  
-        self.slider.setValue(int(current_thickness * 4))
-        self.slider.setTickPosition(QSlider.TicksBelow)
-        self.slider.setTickInterval(4) 
-        layout.addWidget(self.slider)
-        
-        self.slider.valueChanged.connect(self.on_value_changed)
-        
-        # --- OK Button ---
-        btn_box = QDialogButtonBox(QDialogButtonBox.Ok)
-        btn_box.accepted.connect(self.accept)
-        layout.addWidget(btn_box)
-
-    def on_value_changed(self, val):
-        thickness = val / 4.0
-        self.val_label.setText(f"{thickness:.2f} px")
-        
-        if self.parent() and hasattr(self.parent(), 'canvas'):
-            mw = self.parent()
-            if self.target_idx != -1:
-                # 1. Update ONLY the selected polygon
-                img = mw.image_files[mw.current_idx]
-                mw.annotations[img][self.target_idx]["thickness"] = thickness
-                mw.refresh_overlays(keep_selection=True)
-            else:
-                # 2. Update the default brush for new polygons
-                mw.canvas.line_thickness = thickness
-                mw.canvas.update()
 
 class ImageAnnotator(QMainWindow):
     """
@@ -118,8 +68,6 @@ class ImageAnnotator(QMainWindow):
     def __init__(self):
         """Initialize the main window, UI components, and internal state."""
         super().__init__()
-        # Install an application-wide event filter to catch hotkeys globally
-        QtWidgets.QApplication.instance().installEventFilter(self)
         self.setWindowTitle("AnnoMate")
         self.setStyleSheet(MAIN_STYLESHEET)
         self._set_window_icon()
@@ -159,14 +107,6 @@ class ImageAnnotator(QMainWindow):
 
     def _init_ui(self):
         """Orchestrates the creation of the user interface."""
-        # --- Create Top Menu Bar ---
-        menubar = self.menuBar()
-        settings_menu = menubar.addMenu("Settings")
-        
-        action_prefs = QAction("Preferences...", self)
-        action_prefs.triggered.connect(self.open_preferences)
-        settings_menu.addAction(action_prefs)
-
         # Main Layout using CustomSplitter
         self._splitter = CustomSplitter(Qt.Horizontal, self)
         self._splitter.setHandleWidth(3)
@@ -187,30 +127,6 @@ class ImageAnnotator(QMainWindow):
 
         # Default Window Size
         self.resize(1400, 900)
-
-    def open_preferences(self):
-        """Opens the settings dialog for brush thickness, etc."""
-        sel_idx = self.canvas.selected_polygon_idx
-        current_t = self.canvas.line_thickness
-        
-        # If a polygon is selected, fetch ITS thickness
-        if sel_idx != -1 and self.current_idx >= 0:
-            img = self.image_files[self.current_idx]
-            annos = self.annotations.get(img, [])
-            if 0 <= sel_idx < len(annos):
-                current_t = annos[sel_idx].get("thickness", self.canvas.line_thickness)
-        else:
-            sel_idx = -1 # Explicitly pass -1 to edit the default brush
-            
-        dlg = SettingsDialog(self, current_thickness=current_t, target_idx=sel_idx)
-        
-        # Set a helpful title so the user knows what they are editing!
-        if sel_idx != -1:
-            dlg.setWindowTitle("Preferences (Editing Selected Polygon)")
-        else:
-            dlg.setWindowTitle("Preferences (Editing Default Brush)")
-            
-        dlg.exec()
 
     def _setup_canvas(self):
         """Initializes the image display canvas."""
@@ -629,7 +545,7 @@ class ImageAnnotator(QMainWindow):
         # Add Data
         img_name = self.image_files[self.current_idx]
         self.annotations.setdefault(img_name, []).append(
-            {"category_name": class_name, "polygon": points, "thickness": self.canvas.line_thickness}
+            {"category_name": class_name, "polygon": points}
         )
         
         # Propagate inspector
@@ -877,9 +793,7 @@ class ImageAnnotator(QMainWindow):
         overlays = []
         for a in self.annotations.get(img, []):
             color = self.class_colors.get(a["category_name"], QColor(255, 255, 255))
-            # Safely get thickness (fallback to default brush if loading an old project)
-            thickness = a.get("thickness", self.canvas.line_thickness)
-            overlays.append((a["polygon"], color, thickness))
+            overlays.append((a["polygon"], color))
         self.canvas.set_overlays(overlays)
 
     def refresh_meta_fields(self):
@@ -938,7 +852,6 @@ class ImageAnnotator(QMainWindow):
                 "annotations": [
                     {
                         "class": a["category_name"],
-                        "thickness": a.get("thickness", 2.0), # <--- ADD THIS LINE
                         "polygon": [(float(x), float(y)) for (x, y) in a["polygon"]]
                     }
                     for a in anns
@@ -1084,7 +997,6 @@ class ImageAnnotator(QMainWindow):
             for a in info.get("annotations", []):
                 recs.append({
                     "category_name": a.get("class", ""),
-                    "thickness": a.get("thickness", 2.0), # <--- ADD THIS LINE
                     "polygon": a.get("polygon", [])
                 })
             
@@ -1158,61 +1070,13 @@ class ImageAnnotator(QMainWindow):
             except Exception as e:
                 logger.debug(f"Failed to maximize window: {e}")
 
-    def eventFilter(self, obj, event):
-        """Catches hotkeys globally, ignoring them if a text box is focused."""
-        if event.type() == QEvent.KeyPress:
-            # 1. Check if the user is currently typing in a text box
-            focus_widget = QtWidgets.QApplication.focusWidget()
-            if isinstance(focus_widget, (QLineEdit, QTextEdit)):
-                # Let the text box handle the key normally!
-                return super().eventFilter(obj, event)
-
-            # 2. Catch our global hotkeys
-            if event.key() == Qt.Key_P:
-                new_state = not self.btn_poly.isChecked()
-                self.btn_poly.setChecked(new_state)
-                self._set_tool_from_button(POLYGON, self.btn_poly)
-                return True 
-                
-            elif event.key() == Qt.Key_BracketLeft:
-                self.scale_selected_polygon(0.9)
-                return True
-                
-            elif event.key() == Qt.Key_BracketRight:
-                self.scale_selected_polygon(1.1)
-                return True
-                
-            # --- UPDATED: Delete Selected Polygon OR Undo Active Line ---
-            elif event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
-                
-                # 1. Check if we are actively drawing a polygon right now
-                if self.canvas.current_tool == POLYGON and len(self.canvas.current_polygon_points) > 0:
-                    # Let the event pass through to image_label.py to undo the last point
-                    return super().eventFilter(obj, event)
-                
-                # 2. We are NOT drawing. Let's find out what index needs deleting.
-                target_idx = -1
-                if self.canvas.selected_polygon_idx != -1:
-                    target_idx = self.canvas.selected_polygon_idx
-                elif self.ann_list.currentRow() != -1:
-                    target_idx = self.ann_list.currentRow()
-
-                # 3. If we found a valid polygon index, delete it directly from the data
-                if target_idx != -1 and self.current_idx >= 0:
-                    img = self.image_files[self.current_idx]
-                    lst = self.annotations.get(img, [])
-                    
-                    if 0 <= target_idx < len(lst):
-                        lst.pop(target_idx) # Remove it from the dictionary
-                        
-                        # Refresh the UI to show it's gone
-                        self.refresh_ann_list()
-                        self.refresh_overlays()
-                        self._update_table_row(self.current_idx)
-                        return True
-
-        # For all other events, process them normally
-        return super().eventFilter(obj, event)
+    def keyPressEvent(self, event):
+        """Captures hotkeys for modifying the selected polygon."""
+        if event.key() == Qt.Key_BracketLeft:
+            self.scale_selected_polygon(0.9)
+        elif event.key() == Qt.Key_BracketRight:
+            self.scale_selected_polygon(1.1)
+        super().keyPressEvent(event)
 
     def scale_selected_polygon(self, factor: float):
         """Scales the currently selected polygon from its centroid."""
