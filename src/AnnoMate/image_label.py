@@ -130,47 +130,6 @@ class ImageLabel(QLabel):
         self.current_polygon_points.clear()
         self.update()
 
-    def load_image(self, path: str, max_display_dim: int = 1200):
-        bgr = cv2.imread(path, cv2.IMREAD_COLOR)
-        if bgr is None:
-            raise RuntimeError(f"Failed to load image: {path}")
-
-        self._orig_image_bgr = bgr
-        h, w = bgr.shape[:2]
-
-        self._base_scale = (
-            1.0 if max(h, w) <= max_display_dim
-            else max_display_dim / float(max(h, w))
-        )
-
-        self._zoom = 1.0
-        self._pan = QPointF(0, 0)
-
-        new_w = int(w * self._base_scale)
-        new_h = int(h * self._base_scale)
-        
-        resized_bgr = cv2.resize(
-            bgr, (new_w, new_h), interpolation=cv2.INTER_AREA
-        )
-        
-        rgb = cv2.cvtColor(resized_bgr, cv2.COLOR_BGR2RGB)
-        
-        qimg = QImage(
-            rgb.data,
-            rgb.shape[1],
-            rgb.shape[0],
-            rgb.strides[0],
-            QImage.Format_RGB888
-        )
-        self._display_qpix = QPixmap.fromImage(qimg)
-
-        self.clear_current_polygon()
-        self._overlays = []
-        self.selected_polygon_idx = -1
-        self.editing_polygon_idx = -1   
-        self.dragging_vertex_idx = -1  
-        self.update()
-
     def view_to_display(self, p_view: QPointF) -> QPointF:
         return QPointF(
             (p_view.x() - self._pan.x()) / self._zoom,
@@ -179,19 +138,6 @@ class ImageLabel(QLabel):
 
     def display_to_original(self, p_disp: QPointF) -> Tuple[float, float]:
         return (p_disp.x() / self._base_scale, p_disp.y() / self._base_scale)
-
-    def maybe_close_on_first_vertex(self, pos_view: QPointF, thresh_px: float = 8.0) -> bool:
-        if len(self.current_polygon_points) < 3:
-            return False
-            
-        pos_disp = self.view_to_display(pos_view)
-        start_pt = self.current_polygon_points[0]
-        
-        dx = pos_disp.x() - start_pt.x()
-        dy = pos_disp.y() - start_pt.y()
-        
-        distance = (dx * dx + dy * dy) ** 0.5
-        return distance <= thresh_px
 
     def finish_current_polygon(self):
         if self.current_polygon_points and self.main_window is not None:
@@ -293,11 +239,9 @@ class ImageLabel(QLabel):
                     if self.main_window and hasattr(self.main_window, 'on_polygon_selected'):
                         self.main_window.on_polygon_selected(found_idx)
                 
-                if self.maybe_close_on_first_vertex(QPointF(event.pos())):
-                    self.finish_current_polygon()
-                else:
-                    self.current_polygon_points.append(self.view_to_display(QPointF(event.pos())))
-                    self.update()
+                # Unconditionally add the point instead of checking for proximity to the first point
+                self.current_polygon_points.append(self.view_to_display(QPointF(event.pos())))
+                self.update()
                 return
 
             # 3. Normal Selection & Polygon Dragging (When Polygon Tool is OFF)
@@ -317,7 +261,6 @@ class ImageLabel(QLabel):
     def mouseMoveEvent(self, event: QMouseEvent):
         self._mouse_pos = QPointF(event.pos())
         
-        # --- NEW: Live update vertex while dragging ---
         if self.dragging_vertex_idx != -1 and self.editing_polygon_idx != -1:
             new_pos = self.view_to_display(self._mouse_pos)
             pts, _ = self._overlays[self.editing_polygon_idx]
@@ -349,7 +292,6 @@ class ImageLabel(QLabel):
             self.update()  
             return
             
-        # --- NEW: Hover detection for precision cursor ---
         if self.editing_polygon_idx != -1 and not self._dragging_polygon and not self._panning:
             pts, _ = self._overlays[self.editing_polygon_idx]
             hovering = False
@@ -464,7 +406,7 @@ class ImageLabel(QLabel):
                 painter.setPen(pen)
                 painter.setBrush(QBrush(QColor(color.red(), color.green(), color.blue(), alpha)))
                 painter.drawPolygon(QPolygonF(pts + [pts[0]]))
-                # --- NEW: Draw Editing Handles ---
+               
                 if i == self.editing_polygon_idx:
                     # Scale handles so they don't get tiny when zoomed out
                     r = max(4.0 / self._zoom, 1.0) 
