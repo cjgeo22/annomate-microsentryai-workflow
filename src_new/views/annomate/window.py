@@ -1,0 +1,521 @@
+"""
+ImageAnnotator — the AnnoMate View.
+
+Rules enforced here:
+  V1  All file/folder dialogs and message boxes live in this file, not in
+      controllers.  Controllers receive plain paths and return plain values.
+  V2  This file never reads self.model.state directly.  All data access goes
+      through the Model's query API (get_annotations, get_class_color, …).
+  V3  No disk I/O here.  Image loading is delegated to io_controller and the
+      resulting ndarray is handed to the canvas widget.
+  V4  Colors are handled as (r, g, b) tuples until the last moment; QColor
+      is only constructed right before a draw call.
+"""
+
+import os
+from pathlib import Path
+
+from PySide6.QtWidgets import (
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QPushButton, QLabel, QComboBox, QLineEdit, QTextEdit,
+    QScrollArea, QTableView, QHeaderView, QAbstractItemView,
+    QListWidget, QColorDialog, QFileDialog, QMessageBox,
+)
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QColor
+
+from views.annomate.image_label import ImageLabel, POLYGON
+from views.annomate.widgets import CustomSplitter
+
+
+class ImageAnnotator(QMainWindow):
+    viewChanged = Signal(float, float, float)   # reserved for future multi-tab sync
+
+    def __init__(self, model, io_controller):
+        super().__init__()
+        self.model = model
+        self.io_controller = io_controller
+
+        self._init_ui()
+        self._setup_connections()
+
+    # ================================================================== #
+    # UI Construction
+    # ================================================================== #
+
+    def _init_ui(self):
+        self.main_splitter = CustomSplitter(Qt.Horizontal, self)
+        self._setup_canvas()
+        self._setup_sidebar()
+        self.main_splitter.setSizes([900, 420])
+        self.setCentralWidget(self.main_splitter)
+
+    def _setup_canvas(self):
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.canvas = ImageLabel(self)
+        self.canvas.set_main_window(self)
+        layout.addWidget(self.canvas)
+        self.main_splitter.addWidget(container)
+
+    def _setup_sidebar(self):
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setMinimumWidth(320)
+
+        side_widget = QWidget()
+        self.side_layout = QVBoxLayout(side_widget)
+        self.side_layout.setContentsMargins(10, 10, 10, 10)
+        self.side_layout.setSpacing(10)
+
+        self._create_tray_header()
+        self._create_nav_controls()
+        self._create_zoom_controls()
+        self._create_class_controls()
+        self._create_meta_inputs()
+        self._create_dataset_table()
+        self._create_annotation_list()
+        self._create_ops_controls()
+        self._create_export_controls()
+
+        self.side_layout.addStretch()
+        scroll.setWidget(side_widget)
+        self.main_splitter.addWidget(scroll)
+
+    def _create_tray_header(self):
+        row = QHBoxLayout()
+        self.btn_open_folder = QPushButton("📂 Open Folder")
+        self.btn_open_folder.setFixedHeight(35)
+        self.lbl_dir = QLabel("—")
+        self.lbl_dir.setStyleSheet("font-weight: bold;")
+        row.addWidget(self.btn_open_folder)
+        row.addWidget(self.lbl_dir, 1)
+        self.side_layout.addLayout(row)
+
+    def _create_nav_controls(self):
+        nav = QHBoxLayout()
+        self.btn_prev = QPushButton("◀ Prev (A)")
+        self.btn_next = QPushButton("Next (D) ▶")
+        self.btn_prev.setShortcut("A")
+        self.btn_next.setShortcut("D")
+        self.lbl_img = QLabel("0 / 0")
+        self.lbl_img.setAlignment(Qt.AlignCenter)
+        nav.addWidget(self.btn_prev)
+        nav.addWidget(self.btn_next)
+        nav.addWidget(self.lbl_img)
+        self.side_layout.addLayout(nav)
+
+    def _create_zoom_controls(self):
+        bar = QHBoxLayout()
+        self.btn_zoom_in = QPushButton("Zoom +")
+        self.btn_zoom_in.clicked.connect(self.canvas.zoom_in)
+        self.btn_zoom_out = QPushButton("Zoom -")
+        self.btn_zoom_out.clicked.connect(self.canvas.zoom_out)
+        self.btn_reset_view = QPushButton("Reset View")
+        self.btn_reset_view.clicked.connect(self.canvas.reset_view)
+        self.btn_poly = QPushButton("Polygon (P)")
+        self.btn_poly.setCheckable(True)
+        self.btn_poly.setShortcut("P")
+        self.btn_poly.toggled.connect(self._on_polygon_tool_toggled)
+        for w in (self.btn_zoom_in, self.btn_zoom_out, self.btn_reset_view, self.btn_poly):
+            bar.addWidget(w)
+        self.side_layout.addLayout(bar)
+
+    def _create_class_controls(self):
+        row1 = QHBoxLayout()
+        self.class_combo = QComboBox()
+        # V2: use model query instead of model.state
+        self.class_combo.addItems(self.model.get_class_names())
+        self.class_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        self.class_name_edit = QLineEdit()
+        self.class_name_edit.setPlaceholderText("Enter class...")
+        self.btn_add_class = QPushButton("Add Class")
+        row1.addWidget(self.class_combo, 2)
+        row1.addWidget(self.class_name_edit, 2)
+        row1.addWidget(self.btn_add_class)
+        self.side_layout.addLayout(row1)
+
+        row2 = QHBoxLayout()
+        self.btn_color = QPushButton("Change Color")
+        self.btn_del_class = QPushButton("Delete Class")
+        row2.addWidget(self.btn_color)
+        row2.addWidget(self.btn_del_class)
+        self.side_layout.addLayout(row2)
+
+    def _create_meta_inputs(self):
+        self.side_layout.addWidget(QLabel("Inspector"))
+        self.inspector_edit = QLineEdit()
+        self.inspector_edit.setPlaceholderText("Inspector name…")
+        self.side_layout.addWidget(self.inspector_edit)
+
+        self.side_layout.addWidget(QLabel("Image note"))
+        self.note_edit = QTextEdit()
+        self.note_edit.setMaximumHeight(80)
+        self.side_layout.addWidget(self.note_edit)
+
+    def _create_dataset_table(self):
+        self.side_layout.addWidget(QLabel("Dataset Images:"))
+        self.table_view = QTableView()
+        self.table_view.setModel(self.model)
+        self.table_view.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table_view.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table_view.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table_view.verticalHeader().setVisible(False)
+        self.table_view.setAlternatingRowColors(True)
+        self.table_view.setMinimumHeight(200)
+        self.side_layout.addWidget(self.table_view)
+
+    def _create_annotation_list(self):
+        self.side_layout.addWidget(QLabel("Annotations in Current Image:"))
+        self.ann_list = QListWidget()
+        self.ann_list.setMaximumHeight(150)
+        self.side_layout.addWidget(self.ann_list)
+
+    def _create_ops_controls(self):
+        ops = QHBoxLayout()
+        self.btn_delete = QPushButton("Delete Selected")
+        self.btn_sort = QPushButton("Sort by Area")
+        ops.addWidget(self.btn_delete)
+        ops.addWidget(self.btn_sort)
+        self.side_layout.addLayout(ops)
+
+    def _create_export_controls(self):
+        exp = QHBoxLayout()
+        self.btn_export_polys = QPushButton("Export Polygons + Data")
+        self.btn_export_csv = QPushButton("Export CSV")
+        exp.addWidget(self.btn_export_polys)
+        exp.addWidget(self.btn_export_csv)
+        self.side_layout.addLayout(exp)
+
+        self.btn_import_data = QPushButton("Import Data JSON")
+        self.side_layout.addWidget(self.btn_import_data)
+
+    # ================================================================== #
+    # Signal Wiring
+    # ================================================================== #
+
+    def _setup_connections(self):
+        self.btn_open_folder.clicked.connect(self.on_open_folder_clicked)
+        self.btn_prev.clicked.connect(self.prev_image)
+        self.btn_next.clicked.connect(self.next_image)
+
+        self.table_view.selectionModel().selectionChanged.connect(
+            self.on_table_selection_changed
+        )
+        self.model.modelReset.connect(self.on_model_reset)
+        self.model.dataChanged.connect(self.on_model_data_changed)
+
+        self.class_combo.currentTextChanged.connect(self.update_canvas_active_color)
+        self.btn_add_class.clicked.connect(self.add_class_from_edit)
+        self.btn_color.clicked.connect(self.change_class_color)
+        self.btn_del_class.clicked.connect(self.delete_current_class)
+
+        self.inspector_edit.editingFinished.connect(self._store_inspector)
+        self.note_edit.textChanged.connect(self._store_note)
+
+        self.ann_list.itemSelectionChanged.connect(self.on_ann_list_selection)
+
+        self.btn_delete.clicked.connect(self.delete_selected_annotation)
+        self.btn_sort.clicked.connect(self.sort_by_area)
+
+        self.btn_export_polys.clicked.connect(self.on_export_polys_clicked)
+        self.btn_export_csv.clicked.connect(self.on_export_csv_clicked)
+        self.btn_import_data.clicked.connect(self.on_import_data_clicked)
+
+    # ================================================================== #
+    # Slots — Navigation
+    # ================================================================== #
+
+    def on_open_folder_clicked(self):
+        # V1: dialog lives in the View
+        directory = QFileDialog.getExistingDirectory(
+            self, "Open image folder", os.getcwd()
+        )
+        if directory:
+            self.io_controller.load_folder(directory)
+
+    def on_model_reset(self):
+        # V2: model query instead of model.state
+        image_dir = self.model.get_image_dir()
+        self.lbl_dir.setText(Path(image_dir).name if image_dir else "—")
+        if self.model.rowCount() > 0:
+            self.table_view.selectRow(0)
+            self.table_view.setFocus()
+        else:
+            self.lbl_img.setText("0 / 0")
+
+    def on_table_selection_changed(self, selected, deselected):
+        indexes = self.table_view.selectionModel().selectedRows()
+        if not indexes:
+            return
+        row = indexes[0].row()
+
+        # V3: disk I/O delegated to controller
+        bgr = self.io_controller.load_image_for_display(row)
+        if bgr is not None:
+            self.canvas.set_image(bgr)      # V3: canvas receives data, not a path
+            self.refresh_image_view(row)
+            self.refresh_meta_fields(row)
+
+        self._update_image_counter(row)
+
+    def next_image(self):
+        sel = self.table_view.selectionModel()
+        if not sel.hasSelection():
+            return
+        self.table_view.selectRow(min(sel.currentIndex().row() + 1, self.model.rowCount() - 1))
+
+    def prev_image(self):
+        sel = self.table_view.selectionModel()
+        if not sel.hasSelection():
+            return
+        self.table_view.selectRow(max(sel.currentIndex().row() - 1, 0))
+
+    def _update_image_counter(self, row: int):
+        total = self.model.rowCount()
+        self.lbl_img.setText(f"{row + 1} / {total}" if total > 0 else "0 / 0")
+
+    # ================================================================== #
+    # Slots — Model observer
+    # ================================================================== #
+
+    def on_model_data_changed(self, top_left, bottom_right, roles):
+        sel = self.table_view.selectionModel()
+        if not sel.hasSelection():
+            return
+        current_row = sel.currentIndex().row()
+        if top_left.row() <= current_row <= bottom_right.row():
+            self.refresh_image_view(current_row)
+
+    # ================================================================== #
+    # Slots — Canvas callbacks (called by ImageLabel)
+    # ================================================================== #
+
+    def finish_polygon(self, points: list):
+        sel = self.table_view.selectionModel()
+        if not sel.hasSelection():
+            return
+        current_class = self.class_combo.currentText()
+        if not current_class:
+            return
+        self.model.add_annotation(sel.currentIndex().row(), current_class, points)
+
+    def update_polygon_points(self, idx: int, points: list):
+        sel = self.table_view.selectionModel()
+        if not sel.hasSelection():
+            return
+        self.model.update_annotation_points(sel.currentIndex().row(), idx, points)
+
+    def on_polygon_selected(self, idx: int):
+        self.ann_list.blockSignals(True)
+        self.ann_list.setCurrentRow(idx)
+        self.ann_list.blockSignals(False)
+
+    # ================================================================== #
+    # Slots — Class management
+    # ================================================================== #
+
+    def update_canvas_active_color(self, class_name: str):
+        # V4: tuple → QColor at the last moment, right before the draw call
+        rgb = self.model.get_class_color(class_name)
+        self.canvas.set_active_color(QColor(*rgb))
+
+    def add_class_from_edit(self):
+        name = self.class_name_edit.text().strip()
+        if not name:
+            return
+        color = self._pick_next_unique_color()   # returns a tuple
+        if self.model.add_class(name, color):
+            self.class_combo.addItem(name)
+            self.class_combo.setCurrentText(name)
+            self.class_name_edit.clear()
+            self.btn_poly.setChecked(True)
+            self.update_canvas_active_color(name)
+
+    def change_class_color(self):
+        name = self.class_combo.currentText().strip()
+        if not name:
+            return
+        # V2: read via model query; V4: convert tuple → QColor for dialog seed
+        current_rgb = self.model.get_class_color(name)
+        col = QColorDialog.getColor(QColor(*current_rgb), self)
+        if col.isValid():
+            # V4: store as tuple, not QColor
+            self.model.set_class_color(name, (col.red(), col.green(), col.blue()))
+            sel = self.table_view.selectionModel()
+            if sel.hasSelection():
+                self.refresh_image_view(sel.currentIndex().row())
+            self.update_canvas_active_color(name)
+
+    def delete_current_class(self):
+        name = self.class_combo.currentText().strip()
+        if not name:
+            return
+        self.model.delete_class(name)
+        self.class_combo.removeItem(self.class_combo.currentIndex())
+        if self.class_combo.count() > 0:
+            self.update_canvas_active_color(self.class_combo.currentText())
+        sel = self.table_view.selectionModel()
+        if sel.hasSelection():
+            self.refresh_image_view(sel.currentIndex().row())
+
+    def _pick_next_unique_color(self) -> tuple:
+        """Return the first DEFAULT_CLASS_COLOR not already in use."""
+        from core.constants import DEFAULT_CLASS_COLORS
+        # V2: model query; V4: already tuples
+        used = set(self.model.get_used_class_colors())
+        for cand in DEFAULT_CLASS_COLORS:
+            if cand not in used:
+                return cand
+        return DEFAULT_CLASS_COLORS[0]
+
+    def _on_polygon_tool_toggled(self, checked: bool):
+        self.canvas.set_tool(POLYGON if checked else None)
+
+    # ================================================================== #
+    # Slots — Metadata
+    # ================================================================== #
+
+    def _store_inspector(self):
+        sel = self.table_view.selectionModel()
+        if not sel.hasSelection():
+            return
+        self.model.set_inspector(sel.currentIndex().row(), self.inspector_edit.text().strip())
+
+    def _store_note(self):
+        sel = self.table_view.selectionModel()
+        if not sel.hasSelection():
+            return
+        self.model.set_note(sel.currentIndex().row(), self.note_edit.toPlainText().strip())
+
+    def refresh_meta_fields(self, row: int):
+        # V2: model queries instead of state access
+        self.inspector_edit.blockSignals(True)
+        self.note_edit.blockSignals(True)
+        self.inspector_edit.setText(self.model.get_inspector(row))
+        self.note_edit.setPlainText(self.model.get_note(row))
+        self.inspector_edit.blockSignals(False)
+        self.note_edit.blockSignals(False)
+
+    # ================================================================== #
+    # Slots — Annotation list
+    # ================================================================== #
+
+    def on_ann_list_selection(self):
+        idxs = [i.row() for i in self.ann_list.selectedIndexes()]
+        self.canvas.selected_polygon_idx = idxs[0] if idxs else -1
+        self.canvas.update()
+
+    def delete_selected_annotation(self):
+        sel = self.table_view.selectionModel()
+        if not sel.hasSelection():
+            return
+        selected_items = self.ann_list.selectedIndexes()
+        if selected_items:
+            self.model.delete_annotation(sel.currentIndex().row(), selected_items[0].row())
+
+    def sort_by_area(self):
+        sel = self.table_view.selectionModel()
+        if sel.hasSelection():
+            self.model.sort_annotations(sel.currentIndex().row())
+
+    # ================================================================== #
+    # Slots — Export / Import  (V1: dialogs live here, not in controller)
+    # ================================================================== #
+
+    def on_export_polys_clicked(self):
+        out_dir = QFileDialog.getExistingDirectory(
+            self, "Choose output folder", os.getcwd()
+        )
+        if not out_dir:
+            return
+        try:
+            msg = self.io_controller.export_polygons_and_data(out_dir)
+            QMessageBox.information(self, "Export", msg)
+        except Exception as e:
+            QMessageBox.critical(self, "Export Error", str(e))
+
+    def on_export_csv_clicked(self):
+        out_path, _ = QFileDialog.getSaveFileName(
+            self, "Save CSV", "metadata.csv", "CSV (*.csv)"
+        )
+        if not out_path:
+            return
+        try:
+            msg = self.io_controller.export_csv(out_path)
+            QMessageBox.information(self, "Export", msg)
+        except Exception as e:
+            QMessageBox.critical(self, "Export Error", str(e))
+
+    def on_import_data_clicked(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open Data JSON", "", "JSON (*.json)"
+        )
+        if not path:
+            return
+        try:
+            self.io_controller.import_data_json(path)
+        except Exception as e:
+            QMessageBox.critical(self, "Import Error", str(e))
+            return
+
+        # Re-sync class combo after import (class list may have changed)
+        # V2: model query
+        self.class_combo.blockSignals(True)
+        self.class_combo.clear()
+        self.class_combo.addItems(self.model.get_class_names())
+        self.class_combo.blockSignals(False)
+        if self.class_combo.count() > 0:
+            self.update_canvas_active_color(self.class_combo.currentText())
+
+    # ================================================================== #
+    # View refresh helpers
+    # ================================================================== #
+
+    def refresh_image_view(self, row: int):
+        """Pull annotations from the Model and push to ann_list + canvas."""
+        # V2: model query — never touches .state
+        annos = self.model.get_annotations(row)
+
+        self.ann_list.blockSignals(True)
+        self.ann_list.clear()
+        for a in annos:
+            self.ann_list.addItem(f"{a['category_name']} — {len(a['polygon'])} pts")
+        self.ann_list.blockSignals(False)
+
+        # V4: tuple → QColor right at the draw boundary
+        overlays = [
+            (a["polygon"], QColor(*self.model.get_class_color(a["category_name"])))
+            for a in annos
+        ]
+        self.canvas.set_overlays(overlays)
+
+    # ================================================================== #
+    # Hotkeys
+    # ================================================================== #
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_BracketLeft:
+            self._scale_selected_polygon(0.9)
+        elif event.key() == Qt.Key_BracketRight:
+            self._scale_selected_polygon(1.1)
+        super().keyPressEvent(event)
+
+    def _scale_selected_polygon(self, factor: float):
+        idx = self.canvas.selected_polygon_idx
+        sel = self.table_view.selectionModel()
+        if idx == -1 or not sel.hasSelection():
+            return
+        row = sel.currentIndex().row()
+        # V2: model query
+        annos = self.model.get_annotations(row)
+        if not (0 <= idx < len(annos)):
+            return
+        pts = annos[idx]["polygon"]
+        if not pts:
+            return
+        cx = sum(p[0] for p in pts) / len(pts)
+        cy = sum(p[1] for p in pts) / len(pts)
+        new_pts = [(cx + (p[0] - cx) * factor, cy + (p[1] - cy) * factor) for p in pts]
+        self.model.update_annotation_points(row, idx, new_pts)
