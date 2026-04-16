@@ -1,4 +1,4 @@
-from core.state import DatasetState
+from core.dataset_state import DatasetState
 
 
 class TestAnnotationCRUD:

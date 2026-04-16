@@ -1,5 +1,5 @@
 import pytest
-from core.state import DatasetState
+from core.dataset_state import DatasetState
 from models.dataset_model import DatasetTableModel
 
 

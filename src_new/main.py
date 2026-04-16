@@ -4,7 +4,7 @@ from PySide6.QtWidgets import QApplication, QMainWindow, QTabWidget, QVBoxLayout
 from core.logger import setup_logging
 setup_logging()
     
-from core.state import DatasetState
+from core.dataset_state import DatasetState
 from models.dataset_model import DatasetTableModel
 
 from controllers.io_controller import IOController

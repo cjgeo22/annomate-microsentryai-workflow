@@ -5,7 +5,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QAbstractTableModel, QModelIndex
 from PySide6.QtGui import QColor, QBrush
 
-from core.state import DatasetState
+from core.dataset_state import DatasetState
 from core.utils import polygon_area
 
 logger = logging.getLogger("AnnoMate.DatasetModel")
