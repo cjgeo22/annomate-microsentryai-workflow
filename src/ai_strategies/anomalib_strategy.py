@@ -9,7 +9,9 @@ No Qt dependencies.
 import os
 import io
 import pickle
+import pathlib
 import logging
+import platform
 from pathlib import Path
 from typing import Tuple, Optional
 
@@ -43,6 +45,11 @@ class DummyClass(metaclass=DummyMeta):
 
 class DynamicUnpickler(pickle.Unpickler):
     def find_class(self, module, name):
+        if module == "pathlib":
+            if name == "PosixPath" and platform.system() == "Windows":
+                return pathlib.WindowsPath
+            if name == "WindowsPath" and platform.system() != "Windows":
+                return pathlib.PosixPath
         try:
             return super().find_class(module, name)
         except (ImportError, AttributeError, ModuleNotFoundError):
@@ -114,11 +121,14 @@ class AnomalibStrategy:
 
             import functools
             original_torch_load = torch.load
+            original_posix_path = pathlib.PosixPath
 
             try:
                 # Attempt 1: Anomalib TorchInferencer (monkey-patch forces CPU deserialisation)
                 try:
                     torch.load = functools.partial(original_torch_load, map_location="cpu")
+                    if platform.system() == "Windows":
+                        pathlib.PosixPath = pathlib.WindowsPath
 
                     if resolved_device == "mps":
                         logger.debug("Applying MPS shim: initialising on CPU first.")
@@ -136,6 +146,7 @@ class AnomalibStrategy:
 
                 finally:
                     torch.load = original_torch_load
+                    pathlib.PosixPath = original_posix_path
 
             except Exception as anomalib_err:
                 # Attempt 2: Raw PyTorch fallback with DynamicUnpickler
