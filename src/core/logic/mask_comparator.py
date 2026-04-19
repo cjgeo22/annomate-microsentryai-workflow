@@ -13,25 +13,51 @@ from typing import Dict, Any, Optional, Tuple
 
 
 class MaskComparator:
-    """
-    Computes validation metrics and visual overlap maps for two binary masks.
+    """Compute validation metrics and visual overlap maps for two binary masks.
 
-    Args:
-        gt_outline_color:     BGR tuple for the GT contour drawn on the overlay.
-        gt_outline_thickness: Pixel thickness of that contour.
+    Accepts a ground-truth binary mask and a prediction binary mask, then
+    produces pixel-level IoU, precision, and recall metrics along with
+    colour-coded comparison visualizations. Contains zero Qt dependencies.
+
+    Attributes:
+        gt_outline_color (Tuple[int, int, int]): BGR color used when drawing
+            the GT contour on overlay images.
+        gt_outline_thickness (int): Pixel thickness of the GT contour.
     """
 
     def __init__(
         self,
         gt_outline_color: Tuple[int, int, int] = (0, 0, 255),
         gt_outline_thickness: int = 2,
-    ):
+    ) -> None:
+        """Initialize MaskComparator with visualization parameters.
+
+        Args:
+            gt_outline_color (Tuple[int, int, int]): BGR color tuple for the
+                GT contour drawn on overlay images. Defaults to
+                ``(0, 0, 255)`` (red in BGR).
+            gt_outline_thickness (int): Pixel thickness of the GT contour.
+                Defaults to ``2``.
+        """
         self.gt_outline_color = gt_outline_color
         self.gt_outline_thickness = gt_outline_thickness
 
     def _get_centroid(
         self, mask: np.ndarray, area: int
     ) -> Tuple[Optional[int], Optional[int]]:
+        """Compute the centroid of a binary mask using image moments.
+
+        Args:
+            mask (np.ndarray): Single-channel binary mask (uint8).
+            area (int): Pre-computed non-zero pixel count of *mask*. Used as
+                a fast early-exit check to avoid moment computation on empty
+                masks.
+
+        Returns:
+            Tuple[Optional[int], Optional[int]]: ``(cx, cy)`` centroid
+                coordinates as integers. Both values are ``None`` when *area*
+                is zero or when the zeroth moment is zero.
+        """
         if area > 0:
             M = cv2.moments(mask)
             if M["m00"] != 0:
@@ -41,7 +67,31 @@ class MaskComparator:
     def calculate_metrics(
         self, gt_binary: np.ndarray, pred_binary: np.ndarray
     ) -> Dict[str, Any]:
-        """Return dict with iou, precision, recall, areas, centroids, euclidean_distance."""
+        """Compute pixel-level IoU, precision, recall, areas, and centroids.
+
+        Args:
+            gt_binary (np.ndarray): Ground-truth binary mask (uint8, single
+                channel). Non-zero pixels are treated as positive.
+            pred_binary (np.ndarray): Prediction binary mask with the same
+                shape and dtype as *gt_binary*.
+
+        Returns:
+            Dict[str, Any]: Metrics dictionary with the following keys:
+
+            - ``gt_area`` (int): Non-zero pixel count of the GT mask.
+            - ``pred_area`` (int): Non-zero pixel count of the prediction mask.
+            - ``overlap_area`` (int): Pixel count of the intersection.
+            - ``union_area`` (int): Pixel count of the union.
+            - ``iou`` (float): Intersection-over-union as a percentage (0–100).
+            - ``precision`` (float): Prediction precision as a percentage.
+            - ``recall`` (float): GT recall as a percentage.
+            - ``gt_centroid`` (Tuple[Optional[int], Optional[int]]): ``(cx, cy)``
+              centroid of the GT mask, or ``(None, None)`` if empty.
+            - ``pred_centroid`` (Tuple[Optional[int], Optional[int]]): ``(cx, cy)``
+              centroid of the prediction mask, or ``(None, None)`` if empty.
+            - ``euclidean_distance`` (Optional[float]): Pixel distance between
+              centroids, or ``None`` if either mask is empty.
+        """
         gt_area   = cv2.countNonZero(gt_binary)
         pred_area = cv2.countNonZero(pred_binary)
 
@@ -82,10 +132,26 @@ class MaskComparator:
         pred_binary: np.ndarray,
         metrics:     Dict[str, Any],
     ) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Returns (comparison_map, overlay_viz):
-          comparison_map — TP=white, FP=green, FN=red
-          overlay_viz    — TP=green, FP=red, GT outline, centroids marked
+        """Generate colour-coded comparison and overlay visualizations.
+
+        Args:
+            gt_binary (np.ndarray): Ground-truth binary mask (uint8, single
+                channel).
+            pred_binary (np.ndarray): Prediction binary mask with the same
+                shape and dtype as *gt_binary*.
+            metrics (Dict[str, Any]): Metrics dict as returned by
+                :meth:`calculate_metrics`. The ``gt_centroid`` and
+                ``pred_centroid`` keys are used to draw centroid markers.
+
+        Returns:
+            Tuple[np.ndarray, np.ndarray]: A two-element tuple:
+
+            - ``comparison_map``: BGR image where TP pixels are white,
+              FP pixels are green, and FN pixels are red.
+            - ``overlay_viz``: BGR image where TP pixels are green, FP pixels
+              are red, the GT contour is drawn in :attr:`gt_outline_color`,
+              the GT centroid is marked blue, and the prediction centroid
+              is marked cyan.
         """
         fn_mask      = cv2.subtract(gt_binary,   pred_binary)
         fp_mask      = cv2.subtract(pred_binary, gt_binary)
@@ -121,7 +187,22 @@ class MaskComparator:
     def compare_masks(
         self, gt_mask: np.ndarray, pred_mask: np.ndarray
     ) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
-        """Full comparison: returns (comparison_map, overlay_viz, metrics)."""
+        """Run a full mask comparison and return all results.
+
+        Convenience method that calls :meth:`calculate_metrics` followed by
+        :meth:`generate_comparison_viz` and bundles the outputs.
+
+        Args:
+            gt_mask (np.ndarray): Ground-truth binary mask (uint8, single
+                channel).
+            pred_mask (np.ndarray): Prediction binary mask with the same
+                shape and dtype as *gt_mask*.
+
+        Returns:
+            Tuple[np.ndarray, np.ndarray, Dict[str, Any]]: A three-element
+            tuple of ``(comparison_map, overlay_viz, metrics)`` as described
+            in :meth:`generate_comparison_viz` and :meth:`calculate_metrics`.
+        """
         metrics = self.calculate_metrics(gt_mask, pred_mask)
         comparison_map, overlay_viz = self.generate_comparison_viz(
             gt_mask, pred_mask, metrics

@@ -30,21 +30,113 @@ logger = logging.getLogger("MicroSentryAI.AnomalibStrategy")
 # ---------------------------------------------------------------------------
 
 class DummyMeta(type):
-    def __getattr__(cls, name):
+    """Metaclass that returns :class:`DummyClass` for any unknown class attribute.
+
+    Used so that :class:`DummyClass` instances silently absorb any attribute
+    access that would normally raise :exc:`AttributeError` on a real class.
+    """
+
+    def __getattr__(cls, name: str) -> type:
+        """Return :class:`DummyClass` for any attribute looked up on the class.
+
+        Args:
+            name (str): Name of the attribute being accessed.
+
+        Returns:
+            type: Always returns :class:`DummyClass`.
+        """
         return DummyClass
 
 
 class DummyClass(metaclass=DummyMeta):
-    def __init__(self, *args, **kwargs): pass
-    def __call__(self, *args, **kwargs): return DummyClass()
-    def __getattr__(self, name): return DummyClass()
-    def __getitem__(self, key): return DummyClass()
-    def __setitem__(self, key, value): pass
-    def __setstate__(self, state): pass
+    """Catch-all stub that silently absorbs any interaction.
+
+    Used by :class:`DynamicUnpickler` as a replacement for classes that are
+    missing at unpickling time. Every operation — construction, calling,
+    attribute access, item access, and ``__setstate__`` — is a no-op or
+    returns another :class:`DummyClass` instance so deserialization
+    continues without raising exceptions.
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        """Accept and discard any positional or keyword arguments."""
+
+    def __call__(self, *args, **kwargs) -> "DummyClass":
+        """Return a new :class:`DummyClass` instance when called as a function.
+
+        Returns:
+            DummyClass: A fresh no-op stub.
+        """
+        return DummyClass()
+
+    def __getattr__(self, name: str) -> "DummyClass":
+        """Return a :class:`DummyClass` instance for any attribute access.
+
+        Args:
+            name (str): Name of the attribute being accessed.
+
+        Returns:
+            DummyClass: A fresh no-op stub.
+        """
+        return DummyClass()
+
+    def __getitem__(self, key) -> "DummyClass":
+        """Return a :class:`DummyClass` instance for any item lookup.
+
+        Args:
+            key: The key being accessed (ignored).
+
+        Returns:
+            DummyClass: A fresh no-op stub.
+        """
+        return DummyClass()
+
+    def __setitem__(self, key, value) -> None:
+        """Silently ignore item assignment.
+
+        Args:
+            key: The key being assigned (ignored).
+            value: The value being assigned (ignored).
+        """
+
+    def __setstate__(self, state) -> None:
+        """Silently ignore ``__setstate__`` calls during unpickling.
+
+        Args:
+            state: The pickle state dict (ignored).
+        """
 
 
 class DynamicUnpickler(pickle.Unpickler):
-    def find_class(self, module, name):
+    """Pickle unpickler that replaces missing classes with :class:`DummyClass`.
+
+    Handles the common cross-platform mismatch where a checkpoint saved on
+    POSIX contains ``pathlib.PosixPath`` objects that cannot be unpickled on
+    Windows (and vice-versa). Any other import or attribute error during
+    class lookup is caught and replaced with a :class:`DummyClass` stub so
+    that ``torch.load`` can proceed despite missing checkpoint dependencies.
+    """
+
+    def find_class(self, module: str, name: str) -> type:
+        """Resolve a pickled class reference, substituting stubs for missing classes.
+
+        Applies two fixes before the standard lookup:
+
+        1. ``pathlib.PosixPath`` → ``pathlib.WindowsPath`` on Windows.
+        2. ``pathlib.WindowsPath`` → ``pathlib.PosixPath`` on non-Windows.
+
+        Falls back to :class:`DummyClass` for any class that raises
+        :exc:`ImportError`, :exc:`AttributeError`, or
+        :exc:`ModuleNotFoundError`.
+
+        Args:
+            module (str): Dotted module path of the class to look up.
+            name (str): Class name within *module*.
+
+        Returns:
+            type: The resolved class, or :class:`DummyClass` if the class
+                cannot be imported.
+        """
         if module == "pathlib":
             if name == "PosixPath" and platform.system() == "Windows":
                 return pathlib.WindowsPath
@@ -58,23 +150,75 @@ class DynamicUnpickler(pickle.Unpickler):
 
 
 class DynamicPickleModule:
+    """Drop-in replacement for the ``pickle`` module accepted by ``torch.load``.
+
+    Passed as the ``pickle_module`` argument to ``torch.load`` so that
+    :class:`DynamicUnpickler` is used instead of the standard unpickler,
+    enabling deserialization of checkpoints with missing classes.
+
+    Attributes:
+        Unpickler (type): Points to :class:`DynamicUnpickler`.
+    """
+
     Unpickler = DynamicUnpickler
 
     @staticmethod
-    def load(file, **kwargs):
+    def load(file, **kwargs) -> object:
+        """Deserialize an object from an open binary file using :class:`DynamicUnpickler`.
+
+        Args:
+            file: Readable binary file-like object containing pickled data.
+            **kwargs: Ignored; present to match the ``pickle.load`` signature.
+
+        Returns:
+            object: The deserialized Python object.
+        """
         return DynamicUnpickler(file).load()
 
     @staticmethod
-    def loads(b, **kwargs):
+    def loads(b: bytes, **kwargs) -> object:
+        """Deserialize an object from a bytes buffer using :class:`DynamicUnpickler`.
+
+        Args:
+            b (bytes): Bytes buffer containing pickled data.
+            **kwargs: Ignored; present to match the ``pickle.loads`` signature.
+
+        Returns:
+            object: The deserialized Python object.
+        """
         return DynamicUnpickler(io.BytesIO(b)).load()
 
 
 # ---------------------------------------------------------------------------
 
 class AnomalibStrategy:
-    """Strategy for PyTorch (.pt, .ckpt) anomaly detection models."""
+    """Strategy for PyTorch (``.pt``, ``.ckpt``) anomaly detection models.
 
-    def __init__(self):
+    Implements a two-attempt loading pipeline:
+
+    1. **Anomalib TorchInferencer** — the preferred path; handles model
+       metadata, device placement, and structured output automatically.
+    2. **Raw ``torch.load`` fallback** — used when the Anomalib path fails
+       (e.g. missing checkpoint classes); :class:`DynamicPickleModule` is
+       passed as the ``pickle_module`` to suppress import errors.
+
+    Attributes:
+        torch_inferencer (Optional[TorchInferencer]): Active Anomalib
+            inferencer, or ``None`` if the fallback path was used.
+        raw_model: Raw PyTorch model loaded via ``torch.load``, or ``None``
+            if the Anomalib path succeeded.
+        device (str): Requested compute device — ``"auto"``, ``"cpu"``,
+            ``"cuda"``, or ``"mps"``.
+        model_type (str): Short tag set to ``"torch"`` after a successful
+            load.
+        model_name (str): Human-readable label including the backend and
+            device; updated by :meth:`load_from_file`.
+        _device_verified (bool): Set to ``True`` once the tensor device has
+            been confirmed on the first inference call.
+    """
+
+    def __init__(self) -> None:
+        """Initialize the strategy with empty model state and ``"auto"`` device."""
         self.torch_inferencer: Optional[TorchInferencer] = None
         self.raw_model = None
         self.device = "auto"
@@ -82,11 +226,25 @@ class AnomalibStrategy:
         self.model_name = "Unknown"
         self._device_verified = False
 
-    def set_device(self, device_code: str):
+    def set_device(self, device_code: str) -> None:
+        """Set the target compute device for inference.
+
+        Args:
+            device_code (str): Device identifier — one of ``"auto"``,
+                ``"cpu"``, ``"cuda"``, or ``"mps"``. The value is
+                lower-cased before storage.
+        """
         self.device = device_code.lower()
         logger.info("Target device set to: %s", self.device)
 
     def _resolve_device(self) -> str:
+        """Resolve the effective compute device, applying auto-detection if needed.
+
+        Returns:
+            str: The resolved device string — ``"cuda"``, ``"mps"``, or
+                ``"cpu"`` when :attr:`device` is ``"auto"``; otherwise
+                returns :attr:`device` unchanged.
+        """
         if self.device != "auto":
             return self.device
         if torch.cuda.is_available():
@@ -96,13 +254,31 @@ class AnomalibStrategy:
         return "cpu"
 
     def load_from_folder(self, folder_path: str) -> None:
+        """Not supported — PyTorch strategies require a single model file.
+
+        Args:
+            folder_path (str): Unused directory path.
+
+        Raises:
+            NotImplementedError: Always; use :meth:`load_from_file` instead.
+        """
         raise NotImplementedError("Use load_from_file() for PyTorch models.")
 
-    def load_from_file(self, model_path: str):
-        """
-        Load a .pt or .ckpt model.
-        Attempts Anomalib TorchInferencer first; falls back to raw torch.load.
-        Raises RuntimeError on failure.
+    def load_from_file(self, model_path: str) -> None:
+        """Load a ``.pt`` or ``.ckpt`` model file.
+
+        Attempts :class:`~anomalib.deploy.TorchInferencer` first (Attempt 1).
+        On failure falls back to raw ``torch.load`` with
+        :class:`DynamicPickleModule` (Attempt 2). MPS devices are handled by
+        loading on CPU first and then moving tensors to the MPS device.
+
+        Args:
+            model_path (str): Absolute path to the model file. Must have a
+                ``.pt`` or ``.ckpt`` extension.
+
+        Raises:
+            RuntimeError: If both loading attempts fail, wrapping the
+                underlying exception message.
         """
         path = Path(model_path)
         self._device_verified = False
@@ -187,6 +363,20 @@ class AnomalibStrategy:
             raise RuntimeError(f"Load Error: {e}")
 
     def predict(self, image_path: str) -> Tuple[float, np.ndarray]:
+        """Run inference on a single image using whichever backend is loaded.
+
+        Dispatches to :meth:`_predict_anomalib` when a
+        :class:`~anomalib.deploy.TorchInferencer` is active, or to
+        :meth:`_predict_raw` when a raw model is loaded. Returns a zero
+        score and a blank heatmap when no model is loaded.
+
+        Args:
+            image_path (str): Absolute path to the input image file.
+
+        Returns:
+            Tuple[float, np.ndarray]: ``(anomaly_score, heatmap)`` where
+                *heatmap* is a 2-D ``float32`` array normalised to 0–1.
+        """
         if self.torch_inferencer:
             return self._predict_anomalib(image_path)
         if self.raw_model:
@@ -194,6 +384,20 @@ class AnomalibStrategy:
         return 0.0, np.zeros((256, 256), dtype=np.float32)
 
     def _predict_anomalib(self, image_path: str) -> Tuple[float, np.ndarray]:
+        """Run inference via :attr:`torch_inferencer` and return a normalised result.
+
+        On the first call, logs the device the model tensors are resident on.
+        Synchronises the MPS stream after inference when running on Apple
+        Silicon. On any exception, logs the error and returns a zero score
+        with a blank heatmap.
+
+        Args:
+            image_path (str): Absolute path to the input image file.
+
+        Returns:
+            Tuple[float, np.ndarray]: ``(anomaly_score, heatmap)`` where
+                *heatmap* is a 2-D ``float32`` array normalised to 0–1.
+        """
         try:
             if not self._device_verified:
                 try:
@@ -231,6 +435,22 @@ class AnomalibStrategy:
             return 0.0, np.zeros((256, 256), dtype=np.float32)
 
     def _predict_raw(self, image_path: str) -> Tuple[float, np.ndarray]:
+        """Run inference via :attr:`raw_model` using a manual preprocessing pipeline.
+
+        Reads the image with OpenCV, converts to RGB, resizes to 256×256,
+        normalises to 0–1, and runs a ``torch.no_grad`` forward pass.
+        Extracts the heatmap from the first multi-element floating-point
+        tensor in the output and the score from any scalar tensor. On any
+        exception, logs the error and returns a zero score with a blank
+        heatmap.
+
+        Args:
+            image_path (str): Absolute path to the input image file.
+
+        Returns:
+            Tuple[float, np.ndarray]: ``(anomaly_score, heatmap)`` where
+                *heatmap* is a 2-D ``float32`` array normalised to 0–1.
+        """
         try:
             img = cv2.imread(image_path)
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)

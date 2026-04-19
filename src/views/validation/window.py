@@ -23,11 +23,21 @@ logger = logging.getLogger("Validation.Window")
 
 
 class ValidationWindow(QWidget):
-    """
-    Two-step mask validation UI.
+    """Two-step mask validation UI for ground truth generation and IoU evaluation.
 
-    Step 1 — Generate Ground Truth Masks from JSON polygon annotations.
+    Step 1 — Generate binary ground-truth masks from JSON polygon annotations.
     Step 2 — Run IoU evaluation comparing GT masks against model predictions.
+
+    Owns all file dialogs (V1 MVC rule). Delegates all computation to
+    :class:`~controllers.validation_controller.ValidationController` via
+    worker threads. Reads path configuration via the model's query API.
+
+    Attributes:
+        model (ValidationModel): Domain model holding path configuration.
+        controller (ValidationController): Controller that owns the worker
+            threads for mask generation and evaluation.
+        _gen_worker: Active mask-generation worker, or ``None``.
+        _eval_worker: Active evaluation worker, or ``None``.
     """
 
     def __init__(
@@ -35,7 +45,14 @@ class ValidationWindow(QWidget):
         model: ValidationModel,
         controller: ValidationController,
         parent=None,
-    ):
+    ) -> None:
+        """Initialize ValidationWindow and build the UI.
+
+        Args:
+            model (ValidationModel): Validation domain model.
+            controller (ValidationController): Validation controller.
+            parent: Optional Qt parent widget. Defaults to ``None``.
+        """
         super().__init__(parent)
         self.model      = model
         self.controller = controller
@@ -48,7 +65,8 @@ class ValidationWindow(QWidget):
     # UI construction
     # ------------------------------------------------------------------
 
-    def _init_ui(self):
+    def _init_ui(self) -> None:
+        """Build the two-step validation UI with progress bar and results feed."""
         root = QVBoxLayout(self)
 
         # ---- Step 1 ----
@@ -110,7 +128,18 @@ class ValidationWindow(QWidget):
         callback,
         tooltip: str = "",
     ):
-        """Return (path_label, QHBoxLayout) for a file-selection row."""
+        """Create a labelled file-selection row widget.
+
+        Args:
+            button_text (str): Text displayed on the picker button.
+            callback: Callable connected to the button's ``clicked`` signal.
+            tooltip (str): Optional tooltip shown on the button. Defaults to
+                ``""``.
+
+        Returns:
+            Tuple[QLabel, QHBoxLayout]: The path-display label and the
+                layout containing the button and label.
+        """
         row = QHBoxLayout()
         btn = QPushButton(button_text)
         btn.setFixedWidth(150)
@@ -130,14 +159,16 @@ class ValidationWindow(QWidget):
     # Dialog slots — the only place QFileDialog lives
     # ------------------------------------------------------------------
 
-    def _select_poly(self):
+    def _select_poly(self) -> None:
+        """Open a folder picker and store the selected images directory in the model."""
         p = QFileDialog.getExistingDirectory(self, "Select Images Folder")
         if p:
             self.model.set_poly_path(p)
             self.lbl_poly.setText(p)
             self.lbl_poly.setStyleSheet("color: black;")
 
-    def _select_json(self):
+    def _select_json(self) -> None:
+        """Open a file picker and store the selected JSON annotation path in the model."""
         p, _ = QFileDialog.getOpenFileName(
             self, "Select JSON Annotation File", "", "JSON (*.json)"
         )
@@ -146,7 +177,12 @@ class ValidationWindow(QWidget):
             self.lbl_json.setText(p)
             self.lbl_json.setStyleSheet("color: black;")
 
-    def _select_mask_out(self):
+    def _select_mask_out(self) -> None:
+        """Open a folder picker for the mask output directory.
+
+        Stores the selection in the model and pre-fills the GT path label if
+        the model seeds it from the mask output path.
+        """
         p = QFileDialog.getExistingDirectory(self, "Select Mask Output Folder")
         if p:
             self.model.set_mask_out_path(p)
@@ -158,14 +194,16 @@ class ValidationWindow(QWidget):
                 self.lbl_gt.setText(p)
                 self.lbl_gt.setStyleSheet("color: black;")
 
-    def _select_gt(self):
+    def _select_gt(self) -> None:
+        """Open a folder picker and store the selected ground-truth masks path in the model."""
         p = QFileDialog.getExistingDirectory(self, "Select Ground Truth Masks Folder")
         if p:
             self.model.set_gt_path(p)
             self.lbl_gt.setText(p)
             self.lbl_gt.setStyleSheet("color: black;")
 
-    def _select_pred(self):
+    def _select_pred(self) -> None:
+        """Open a folder picker and store the selected predictions path in the model."""
         p = QFileDialog.getExistingDirectory(self, "Select Predictions Folder")
         if p:
             self.model.set_pred_path(p)
@@ -176,7 +214,8 @@ class ValidationWindow(QWidget):
     # Worker launch
     # ------------------------------------------------------------------
 
-    def _run_generation(self):
+    def _run_generation(self) -> None:
+        """Validate inputs, launch the mask-generation worker, and wire its signals."""
         if not self.model.can_generate():
             QMessageBox.warning(
                 self,
@@ -201,7 +240,8 @@ class ValidationWindow(QWidget):
         self._gen_worker = worker
         worker.start()
 
-    def _run_evaluation(self):
+    def _run_evaluation(self) -> None:
+        """Validate inputs, launch the evaluation worker, and wire its signals."""
         if not self.model.can_evaluate():
             QMessageBox.warning(
                 self,
@@ -231,13 +271,28 @@ class ValidationWindow(QWidget):
     # Results feed helpers
     # ------------------------------------------------------------------
 
-    def _add_log_text(self, text: str):
+    def _add_log_text(self, text: str) -> None:
+        """Append a monospace log message label to the results feed.
+
+        Args:
+            text (str): Log message to display.
+        """
         lbl = QLabel(text)
         lbl.setStyleSheet("color: #333; font-family: monospace;")
         self.results_layout.addWidget(lbl)
         self._scroll_to_bottom()
 
-    def _add_result_card(self, image_path: str, text: str, iou: float):
+    def _add_result_card(self, image_path: str, text: str, iou: float) -> None:
+        """Append a styled result card with an image and IoU summary to the feed.
+
+        The card border is green when ``iou > 50`` and red otherwise.
+
+        Args:
+            image_path (str): Absolute path to the comparison visualization
+                image to display inside the card.
+            text (str): Summary text shown as the card title.
+            iou (float): IoU score used to select the border color.
+        """
         card = QFrame()
         card.setFrameShape(QFrame.StyledPanel)
         color = "#4CAF50" if iou > 50 else "#F44336"
@@ -261,16 +316,26 @@ class ValidationWindow(QWidget):
         self.results_layout.addWidget(card)
         self._scroll_to_bottom()
 
-    def _clear_results(self):
+    def _clear_results(self) -> None:
+        """Remove and delete all widgets from the results feed layout."""
         while self.results_layout.count():
             item = self.results_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
 
-    def _scroll_to_bottom(self):
+    def _scroll_to_bottom(self) -> None:
+        """Scroll the results feed scroll area to its maximum vertical position."""
         sb = self.scroll_area.verticalScrollBar()
         sb.setValue(sb.maximum())
 
-    def _set_ui_state(self, enabled: bool):
+    def _set_ui_state(self, enabled: bool) -> None:
+        """Enable or disable the Generate and Run buttons.
+
+        Called with ``False`` before starting a worker and with ``True``
+        from the worker's ``finished`` signal.
+
+        Args:
+            enabled (bool): ``True`` to enable buttons; ``False`` to disable.
+        """
         self.btn_gen.setEnabled(enabled)
         self.btn_run.setEnabled(enabled)

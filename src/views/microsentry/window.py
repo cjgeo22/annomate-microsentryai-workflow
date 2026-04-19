@@ -39,20 +39,52 @@ logger = logging.getLogger("MicroSentryAI.Window")
 # ---------------------------------------------------------------------------
 
 class _InferenceStatusProxy(QIdentityProxyModel):
-    """Thin proxy that replaces column-1 display with inference processing status."""
+    """Proxy model that overrides column 1 to show per-image inference status.
+
+    Wraps a :class:`~models.dataset_model.DatasetTableModel` and replaces
+    the review-status column with ``"Processed"`` / ``"Pending"`` text and
+    matching background colours derived from the inference model.
+
+    Attributes:
+        _inference_model (InferenceModel): Source of truth for which images
+            have been processed.
+        _dataset_model (DatasetTableModel): Underlying dataset model used to
+            look up image paths.
+    """
 
     def __init__(
         self,
         inference_model: InferenceModel,
         dataset_model: DatasetTableModel,
         parent=None,
-    ):
+    ) -> None:
+        """Initialize the proxy and set *dataset_model* as the source model.
+
+        Args:
+            inference_model (InferenceModel): Inference state used to derive
+                per-row processing status.
+            dataset_model (DatasetTableModel): Source model for all other columns.
+            parent: Optional Qt parent object. Defaults to ``None``.
+        """
         super().__init__(parent)
         self.setSourceModel(dataset_model)
         self._inference_model = inference_model
         self._dataset_model = dataset_model
 
-    def data(self, index, role=Qt.DisplayRole):
+    def data(self, index: QModelIndex, role: int = Qt.DisplayRole) -> object:
+        """Return inference status text or background color for column 1.
+
+        All other columns and roles are forwarded to the source model.
+
+        Args:
+            index (QModelIndex): Cell index being queried.
+            role (int): Qt item data role. Defaults to ``Qt.DisplayRole``.
+
+        Returns:
+            object: ``"Processed"`` / ``"Pending"`` string for
+                ``Qt.DisplayRole``; a :class:`~PySide6.QtGui.QBrush` for
+                ``Qt.BackgroundRole``; otherwise defers to the source model.
+        """
         if not index.isValid() or index.column() != 1:
             return super().data(index, role)
         row = index.row()
@@ -73,7 +105,8 @@ class _InferenceStatusProxy(QIdentityProxyModel):
             )
         return super().data(index, role)
 
-    def refresh_status_column(self):
+    def refresh_status_column(self) -> None:
+        """Emit ``dataChanged`` for all rows in column 1 to force a repaint."""
         n = self.rowCount()
         if n > 0:
             self.dataChanged.emit(self.index(0, 1), self.index(n - 1, 1))
@@ -84,14 +117,34 @@ class _InferenceStatusProxy(QIdentityProxyModel):
 # ---------------------------------------------------------------------------
 
 class MicroSentryWindow(QWidget):
-    """
-    MVC view for the MicroSentryAI pane.
+    """MVC view for the MicroSentryAI anomaly-detection pane.
 
-    Constructor args:
-        dataset_model        — shared QAbstractTableModel (image list + filenames)
-        inference_model      — pure-Python model for heatmap/score-map results
-        inference_controller — headless inference + visualisation logic
-        io_controller        — shared file I/O controller (folder scanning)
+    Designed for tab embedding (QWidget, not QMainWindow). All Qt dialogs
+    live here; all computation is delegated to the inference controller.
+    Never reads ``*.state`` directly — uses model query APIs only.
+
+    Attributes:
+        dataset_model (DatasetTableModel): Shared image-list model.
+        inference_model (InferenceModel): Pure-Python heatmap/score-map model.
+        inference_controller (InferenceController): Headless inference and
+            visualisation logic.
+        io_controller (IOController): Shared folder-scan I/O controller.
+        canvas_pair (CanvasPair): Dual synchronised canvas widget.
+        _current_row (int): Zero-based index of the image currently displayed.
+        _current_pil (Optional[Image.Image]): PIL image for the current row.
+        _last_scale (float): Display scale applied to the last rendered image.
+        _last_offset (tuple): Crop offset ``(x, y)`` of the last rendered image.
+        _undo_stack (List[list]): Undo history as serialised polygon snapshots.
+        _redo_stack (List[list]): Redo history as serialised polygon snapshots.
+
+    Signals:
+        polygonsSent (list, str): Emitted when polygons are sent to AnnoMate;
+            carries the list of polygon coordinate lists and the default class
+            name.
+        viewChanged (float, float, float): Emitted with ``(rx, ry, scale)``
+            for cross-tab pan/zoom synchronisation.
+        row_selection_changed (int): Emitted when the selected row changes,
+            for cross-tab sync.
     """
 
     polygonsSent          = Signal(list, str)           # (polygons in original coords, default class)
@@ -105,7 +158,17 @@ class MicroSentryWindow(QWidget):
         inference_controller: InferenceController,
         io_controller: IOController,
         parent=None,
-    ):
+    ) -> None:
+        """Initialize MicroSentryWindow, build the UI, and wire controller signals.
+
+        Args:
+            dataset_model (DatasetTableModel): Shared image-list model.
+            inference_model (InferenceModel): Heatmap/score-map model.
+            inference_controller (InferenceController): Inference and
+                visualisation logic.
+            io_controller (IOController): Shared folder-scan controller.
+            parent: Optional Qt parent widget. Defaults to ``None``.
+        """
         super().__init__(parent)
         self.dataset_model = dataset_model
         self.inference_model = inference_model
@@ -144,7 +207,8 @@ class MicroSentryWindow(QWidget):
     # UI construction
     # ------------------------------------------------------------------
 
-    def _init_ui(self):
+    def _init_ui(self) -> None:
+        """Build the splitter layout with toolbar, canvas, bottom bar, and sidebar."""
         self._proxy = _InferenceStatusProxy(
             self.inference_model, self.dataset_model, self
         )
@@ -176,7 +240,17 @@ class MicroSentryWindow(QWidget):
         self.status_label = QLabel()
         root.addWidget(self.status_label)
 
-    def _build_toolbar(self, layout: QVBoxLayout):
+    def _build_toolbar(self, layout: QVBoxLayout) -> None:
+        """Construct the two-row toolbar and append it to *layout*.
+
+        Row 1 contains model status, display size, heatmap alpha, and heat
+        minimum threshold controls. Row 2 contains smoothing sigma, simplify
+        epsilon, simplify/load/send buttons.
+
+        Args:
+            layout (QVBoxLayout): Parent layout to which the toolbar rows are
+                appended.
+        """
         r1 = QWidget()
         r1l = QHBoxLayout(r1)
         r1l.setContentsMargins(5, 5, 5, 0)
@@ -252,7 +326,13 @@ class MicroSentryWindow(QWidget):
         layout.addWidget(r1)
         layout.addWidget(r2)
 
-    def _build_bottom_bar(self, layout: QVBoxLayout):
+    def _build_bottom_bar(self, layout: QVBoxLayout) -> None:
+        """Construct the percentile-threshold slider row and append it to *layout*.
+
+        Args:
+            layout (QVBoxLayout): Parent layout to which the bottom bar is
+                appended.
+        """
         self.slider_label = QLabel("Percentile Threshold: 95.0")
         layout.addWidget(self.slider_label)
 
@@ -280,7 +360,13 @@ class MicroSentryWindow(QWidget):
 
         layout.addWidget(bar)
 
-    def _build_sidebar(self, layout: QVBoxLayout):
+    def _build_sidebar(self, layout: QVBoxLayout) -> None:
+        """Construct the dataset table sidebar and append it to *layout*.
+
+        Args:
+            layout (QVBoxLayout): Parent layout to which the sidebar is
+                appended.
+        """
         layout.addWidget(QLabel("Dataset"))
 
         self.table_view = QTableView()
@@ -302,7 +388,8 @@ class MicroSentryWindow(QWidget):
     # Signal wiring
     # ------------------------------------------------------------------
 
-    def _connect_signals(self):
+    def _connect_signals(self) -> None:
+        """Wire all button, spin, slider, and table signals to their slot methods."""
         self.btn_load_model.clicked.connect(self._load_model_clicked)
         self.btn_load_images.clicked.connect(self._load_images_clicked)
         self.btn_send_annot.clicked.connect(self._send_annotations)
@@ -326,7 +413,8 @@ class MicroSentryWindow(QWidget):
             lambda rx, ry, s: self.viewChanged.emit(rx, ry, s)
         )
 
-    def _setup_shortcuts(self):
+    def _setup_shortcuts(self) -> None:
+        """Register Ctrl+Z (undo), Ctrl+Y (redo), and S (simplify) keyboard shortcuts."""
         QShortcut(QKeySequence("Ctrl+Z"), self).activated.connect(self._undo)
         QShortcut(QKeySequence("Ctrl+Y"), self).activated.connect(self._redo)
         QShortcut(QKeySequence("S"),      self).activated.connect(self._simplify_selected)
@@ -335,7 +423,18 @@ class MicroSentryWindow(QWidget):
     # Row navigation
     # ------------------------------------------------------------------
 
-    def _on_row_changed(self, current: QModelIndex, _previous: QModelIndex):
+    def _on_row_changed(self, current: QModelIndex, _previous: QModelIndex) -> None:
+        """Load and render the image for the newly selected dataset row.
+
+        Resets undo/redo history on each row change, then delegates image
+        loading and rendering to :meth:`_load_and_render`. Emits
+        :attr:`row_selection_changed` unless :attr:`_syncing` is set.
+
+        Args:
+            current (QModelIndex): Model index of the newly selected row.
+            _previous (QModelIndex): Model index of the previously selected
+                row (unused).
+        """
         row = current.row()
         if row < 0 or row >= self.dataset_model.rowCount():
             return
@@ -348,16 +447,25 @@ class MicroSentryWindow(QWidget):
         if not self._syncing:
             self.row_selection_changed.emit(row)
 
-    def _prev_image(self):
+    def _prev_image(self) -> None:
+        """Move the selection to the previous row if not already at row 0."""
         if self._current_row > 0:
             self.select_row(self._current_row - 1)
 
-    def _next_image(self):
+    def _next_image(self) -> None:
+        """Move the selection to the next row if not already at the last row."""
         if self._current_row < self.dataset_model.rowCount() - 1:
             self.select_row(self._current_row + 1)
 
-    def select_row(self, row: int):
-        """Public API for cross-pane row sync. Suppresses recursive sync emission."""
+    def select_row(self, row: int) -> None:
+        """Select *row* in the dataset table without emitting :attr:`row_selection_changed`.
+
+        Sets :attr:`_syncing` to prevent the resulting ``currentRowChanged``
+        signal from triggering a recursive sync emission.
+
+        Args:
+            row (int): Zero-based row index to select.
+        """
         self._syncing = True
         self.table_view.setCurrentIndex(self._proxy.index(row, 0))
         self._syncing = False
@@ -366,7 +474,15 @@ class MicroSentryWindow(QWidget):
     # Image loading and rendering
     # ------------------------------------------------------------------
 
-    def _load_and_render(self, row: int):
+    def _load_and_render(self, row: int) -> None:
+        """Load the image at *row* and trigger a full render to the canvas.
+
+        Delegates image loading to the inference controller and invalidates
+        the heatmap cache so the next render recomputes from scratch.
+
+        Args:
+            row (int): Zero-based row index of the image to load and display.
+        """
         path = self.dataset_model.get_image_path(row)
         pil = self.inference_controller.load_image(path)
         if pil is None:
@@ -379,6 +495,12 @@ class MicroSentryWindow(QWidget):
         self.status_label.setText(f"{Path(path).name}  ({row + 1} / {n})")
 
     def _current_heatmap_params(self) -> tuple:
+        """Return a tuple of the current render-parameter values used for cache keys.
+
+        Returns:
+            tuple: ``(alpha, sigma, display_target, heat_min_pct, image_path)``
+                reflecting the current UI control values and the active image path.
+        """
         path = self.dataset_model.get_image_path(self._current_row)
         return (
             float(self.alpha_spin.value()),
@@ -389,20 +511,36 @@ class MicroSentryWindow(QWidget):
         )
 
     def _is_heatmap_cache_valid(self) -> bool:
+        """Return ``True`` when the cached heatmap result matches the current parameters.
+
+        Returns:
+            bool: ``True`` if a cached result exists and the render parameters
+                have not changed since it was computed.
+        """
         return (
             self._cached_heatmap_result is not None
             and self._cached_heatmap_params == self._current_heatmap_params()
         )
 
-    def _invalidate_heatmap_cache(self):
+    def _invalidate_heatmap_cache(self) -> None:
+        """Clear the cached heatmap result and parameter snapshot."""
         self._cached_heatmap_result = None
         self._cached_heatmap_params = None
 
-    def _on_slider_changed(self, _):
+    def _on_slider_changed(self, _) -> None:
+        """Update the threshold label and debounce rendering when the slider moves."""
         self.slider_label.setText(f"Percentile Threshold: {self.slider.value():.1f}")
         self._slider_timer.start()
 
-    def _render_current(self):
+    def _render_current(self) -> None:
+        """Render the current image to the canvas, using the heatmap cache when valid.
+
+        On a cache miss the full heatmap pipeline is run via the inference
+        controller, the result is cached, and both background images plus
+        polygon overlays are pushed to :attr:`canvas_pair`. On a cache hit
+        only the segmentation contours are recomputed and the polygons are
+        updated without replacing the background images.
+        """
         if self._current_pil is None or self._current_row < 0:
             return
 
@@ -461,7 +599,8 @@ class MicroSentryWindow(QWidget):
     # Model loading
     # ------------------------------------------------------------------
 
-    def _load_model_clicked(self):
+    def _load_model_clicked(self) -> None:
+        """Open file and device pickers, load the model, and start background inference."""
         path, _ = QFileDialog.getOpenFileName(
             self, "Select Exported Model", "", "PyTorch Models (*.pt *.ckpt)"
         )
@@ -503,7 +642,8 @@ class MicroSentryWindow(QWidget):
     # Folder loading (standalone / independent of AnnoMate IO controller)
     # ------------------------------------------------------------------
 
-    def _load_images_clicked(self):
+    def _load_images_clicked(self) -> None:
+        """Open a folder picker and delegate scanning to the shared I/O controller."""
         folder = QFileDialog.getExistingDirectory(self, "Select Image Folder", "")
         if not folder:
             return
@@ -518,8 +658,13 @@ class MicroSentryWindow(QWidget):
 
         self.select_row(0)
 
-    def _on_model_reset(self):
-        """React to dataset model reload (e.g. folder loaded from AnnoMate)."""
+    def _on_model_reset(self) -> None:
+        """React to a dataset model reset by clearing state and restarting inference.
+
+        Connected to :attr:`~models.dataset_model.DatasetTableModel.modelReset`.
+        Clears the current row, PIL cache, undo/redo history, and inference
+        state, then launches background inference if a model is loaded.
+        """
         self._current_row = -1
         self._current_pil = None
         self._undo_stack.clear()
@@ -537,7 +682,8 @@ class MicroSentryWindow(QWidget):
     # Background inference
     # ------------------------------------------------------------------
 
-    def _start_background_inference(self):
+    def _start_background_inference(self) -> None:
+        """Build the list of unprocessed images and start the batch inference worker."""
         n = self.dataset_model.rowCount()
         pending = [
             self.dataset_model.get_image_path(i)
@@ -557,7 +703,13 @@ class MicroSentryWindow(QWidget):
         # Controller owns the worker; signals are wired once in __init__
         self.inference_controller.start_batch_inference(pending)
 
-    def _on_worker_result(self, path: str, score_map):
+    def _on_worker_result(self, path: str, score_map) -> None:
+        """Store a completed score map and refresh the canvas if this is the current image.
+
+        Args:
+            path (str): Absolute path of the processed image.
+            score_map: NumPy array score map returned by the inference worker.
+        """
         self.inference_model.set_score_map(path, score_map)
 
         for row in range(self.dataset_model.rowCount()):
@@ -571,7 +723,8 @@ class MicroSentryWindow(QWidget):
                 self._invalidate_heatmap_cache()
                 self._render_current()
 
-    def _on_worker_finished(self):
+    def _on_worker_finished(self) -> None:
+        """Hide the progress bar and show a completion message in the status label."""
         self.progress_bar.setVisible(False)
         self.status_label.setText("Batch inference complete.")
 
@@ -579,7 +732,12 @@ class MicroSentryWindow(QWidget):
     # Render parameter handlers
     # ------------------------------------------------------------------
 
-    def _on_sigma_change(self, v: int):
+    def _on_sigma_change(self, v: int) -> None:
+        """Update the sigma label and trigger a full re-render when sigma changes.
+
+        Args:
+            v (int): New sigma value from the spin box.
+        """
         self.sigma_label.setText(f"σ: {v}")
         self._render_current()
 
@@ -587,17 +745,27 @@ class MicroSentryWindow(QWidget):
     # Undo / Redo  (Memento — transient UI state only)
     # ------------------------------------------------------------------
 
-    def _on_any_edit(self, kind: str):
+    def _on_any_edit(self, kind: str) -> None:
+        """Push an undo snapshot for edit kinds that mark the start of a gesture.
+
+        Only ``"vertex_drag_begin"`` and ``"polygon_move"`` push a snapshot;
+        intermediate drag events are intentionally skipped.
+
+        Args:
+            kind (str): Edit event kind string emitted by :class:`SegPathItem`.
+        """
         if kind in ("vertex_drag_begin", "polygon_move"):
             self._push_undo()
 
-    def _push_undo(self):
+    def _push_undo(self) -> None:
+        """Serialise the current polygon state onto the undo stack and clear the redo stack."""
         if self._block_history:
             return
         self._undo_stack.append(self.canvas_pair.serialize_polygons())
         self._redo_stack.clear()
 
-    def _undo(self):
+    def _undo(self) -> None:
+        """Pop the last polygon snapshot from the undo stack and restore it."""
         if not self._undo_stack:
             return
         self._block_history = True
@@ -609,7 +777,8 @@ class MicroSentryWindow(QWidget):
         finally:
             self._block_history = False
 
-    def _redo(self):
+    def _redo(self) -> None:
+        """Pop the top redo snapshot and restore it, pushing the current state to undo."""
         if not self._redo_stack:
             return
         self._block_history = True
@@ -625,7 +794,12 @@ class MicroSentryWindow(QWidget):
     # Key events — Delete, [ = shrink, ] = grow
     # ------------------------------------------------------------------
 
-    def keyPressEvent(self, event):
+    def keyPressEvent(self, event) -> None:
+        """Handle Delete/Backspace (remove polygons) and ``[`` / ``]`` (scale polygons).
+
+        Args:
+            event: The key press event passed by Qt.
+        """
         if event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
             self._push_undo()
             for item in list(self.canvas_pair.scene_left.selectedItems()):
@@ -646,14 +820,16 @@ class MicroSentryWindow(QWidget):
     # Polygon simplification
     # ------------------------------------------------------------------
 
-    def _simplify_selected(self):
+    def _simplify_selected(self) -> None:
+        """Apply Douglas-Peucker simplification to all selected polygons."""
         eps = float(self.eps_spin.value())
         self._push_undo()
         for item in self.canvas_pair.scene_left.selectedItems():
             if isinstance(item, SegPathItem):
                 item.simplify(eps)
 
-    def _simplify_all(self):
+    def _simplify_all(self) -> None:
+        """Apply Douglas-Peucker simplification to every polygon in the left scene."""
         eps = float(self.eps_spin.value())
         self._push_undo()
         for item in self.canvas_pair.scene_left.items():
@@ -664,7 +840,14 @@ class MicroSentryWindow(QWidget):
     # Send polygons to AnnoMate
     # ------------------------------------------------------------------
 
-    def _send_annotations(self):
+    def _send_annotations(self) -> None:
+        """Emit :attr:`polygonsSent` with selected polygons, or all if none are selected.
+
+        Converts display-coordinate polygons to original image coordinates via
+        :meth:`~views.microsentry.canvas.CanvasPair.get_selected_polygons_original_coords`
+        or :meth:`~views.microsentry.canvas.CanvasPair.get_polygons_original_coords`
+        before emitting.
+        """
         selected = [
             i for i in self.canvas_pair.scene_left.selectedItems()
             if isinstance(i, SegPathItem)
@@ -688,14 +871,30 @@ class MicroSentryWindow(QWidget):
     # External sync API
     # ------------------------------------------------------------------
 
-    def set_view_state(self, rx: float, ry: float, scale: float):
-        """Apply pan/zoom from an external source (cross-tab sync)."""
+    def set_view_state(self, rx: float, ry: float, scale: float) -> None:
+        """Apply a pan/zoom state from an external source for cross-tab sync.
+
+        Args:
+            rx (float): Relative horizontal center position (0.0–1.0).
+            ry (float): Relative vertical center position (0.0–1.0).
+            scale (float): Absolute zoom scale factor.
+        """
         self.canvas_pair.set_view_state(rx, ry, scale)
 
-    def showEvent(self, event):
+    def showEvent(self, event) -> None:
+        """Fit both canvas views to their scenes when the widget is first shown.
+
+        Args:
+            event: The show event passed by Qt.
+        """
         super().showEvent(event)
         QTimer.singleShot(50, self.canvas_pair.fit_views)
 
-    def resizeEvent(self, event):
+    def resizeEvent(self, event) -> None:
+        """Re-fit both canvas views when the widget is resized.
+
+        Args:
+            event: The resize event passed by Qt.
+        """
         super().resizeEvent(event)
         self.canvas_pair.fit_views()

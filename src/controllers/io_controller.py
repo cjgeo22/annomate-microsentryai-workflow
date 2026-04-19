@@ -25,11 +25,38 @@ logger = logging.getLogger("AnnoMate.IOController")
 
 
 class IOController:
-    def __init__(self, model):
+    """Headless business logic for all dataset file I/O operations.
+
+    Handles folder scanning, image loading, polygon/overlay export, CSV
+    export, and JSON import in both custom and COCO formats. Contains zero
+    Qt GUI dependencies — all methods accept and return plain Python values;
+    errors are raised as exceptions for callers (Views) to handle.
+
+    Attributes:
+        model: Dataset model exposing ``state``, ``load_folder``,
+            ``get_image_path``, ``beginResetModel``, and ``endResetModel``.
+    """
+
+    def __init__(self, model) -> None:
+        """Initialize IOController with a bound dataset model.
+
+        Args:
+            model: Dataset model that exposes ``state``, ``load_folder``,
+                ``get_image_path``, ``beginResetModel``, and
+                ``endResetModel``.
+        """
         self.model = model
 
-    def load_folder(self, directory: str):
-        """Scan a directory for images and load them into the model."""
+    def load_folder(self, directory: str) -> None:
+        """Scan a directory for images and load them into the model.
+
+        Only files with extensions ``.png``, ``.jpg``, ``.jpeg``, ``.bmp``,
+        ``.tif``, and ``.tiff`` (case-insensitive) are included. Results are
+        sorted alphabetically before being passed to the model.
+
+        Args:
+            directory (str): Absolute path to the folder to scan.
+        """
         logger.debug("Scanning directory for images: %s", directory)
         
         exts = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
@@ -41,9 +68,14 @@ class IOController:
         self.model.load_folder(directory, files)
 
     def load_image_for_display(self, row: int) -> Optional[np.ndarray]:
-        """
-        Read the image at *row* from disk and return a BGR ndarray.
-        Returns None if the file cannot be read.
+        """Read the image at *row* from disk and return a BGR ndarray.
+
+        Args:
+            row (int): Zero-based row index into the model's image list.
+
+        Returns:
+            Optional[np.ndarray]: BGR image array, or ``None`` if the file
+                cannot be read.
         """
         path = self.model.get_image_path(row)
         bgr = cv2.imread(path, cv2.IMREAD_COLOR)
@@ -52,10 +84,23 @@ class IOController:
         return bgr
 
     def export_polygons_and_data(self, out_dir: str) -> str:
-        """
-        Write overlay images + a JSON data file to *out_dir*.
-        Returns a human-readable success message.
-        Raises RuntimeError on I/O failure.
+        """Write overlay images and a JSON data file to *out_dir*.
+
+        For each annotated image, composites filled polygon overlays onto the
+        source image using Pillow and saves the result as a JPEG. A single
+        JSON file containing all annotations, metadata, and class definitions
+        is written alongside the overlay images. Colors are stored as plain
+        ``[r, g, b]`` lists for JSON serialisability.
+
+        Args:
+            out_dir (str): Absolute path to the output directory.
+
+        Returns:
+            str: Human-readable success message including the count of overlay
+                images saved and the path to the JSON data file.
+
+        Raises:
+            RuntimeError: If no images are currently loaded in the model.
         """
         state = self.model.state
         if not state.image_files:
@@ -130,9 +175,20 @@ class IOController:
         return f"Saved {saved_count} image(s) + data JSON:\n{data_path}"
 
     def export_csv(self, out_path: str) -> str:
-        """
-        Write per-image metadata to a CSV at *out_path*.
-        Returns a success message. Raises on I/O failure.
+        """Write per-image metadata to a CSV file at *out_path*.
+
+        Each row contains tray name, image filename, inspector, note, and a
+        comma-separated list of unique annotation class names (or ``"good"``
+        when the image has been reviewed but carries no annotations).
+
+        Args:
+            out_path (str): Absolute path for the output CSV file.
+
+        Returns:
+            str: Human-readable success message containing *out_path*.
+
+        Raises:
+            RuntimeError: If no images are currently loaded in the model.
         """
         state = self.model.state
         if not state.image_files:
@@ -169,10 +225,21 @@ class IOController:
     # Import
     # ------------------------------------------------------------------ #
 
-    def import_data_json(self, path: str):
-        """
-        Load annotations from a custom or COCO JSON file into the model.
-        Raises on parse/import errors.
+    def import_data_json(self, path: str) -> None:
+        """Load annotations from a custom or COCO JSON file into the model.
+
+        Clears existing annotations, inspectors, and notes before importing.
+        Dispatches to :meth:`_import_custom_format` when ``images`` is a
+        ``dict``, or :meth:`_import_coco_format` when it is a ``list``.
+        Triggers a full model reset after loading so all attached views
+        refresh.
+
+        Args:
+            path (str): Absolute path to the JSON file to import.
+
+        Raises:
+            json.JSONDecodeError: If the file is not valid JSON.
+            OSError: If the file cannot be opened.
         """
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -192,7 +259,20 @@ class IOController:
         self.model.beginResetModel()
         self.model.endResetModel()
 
-    def _import_custom_format(self, state, data: dict, images_node: dict):
+    def _import_custom_format(self, state, data: dict, images_node: dict) -> None:
+        """Populate *state* from a custom AnnoMate JSON export.
+
+        Rebuilds the class registry from the ``classes`` and ``class_colors``
+        keys, then populates annotations, inspector, and note fields for each
+        image entry. Missing colors fall back to
+        :data:`~core.utils.constants.DEFAULT_CLASS_COLORS`.
+
+        Args:
+            state: Dataset state object whose fields are mutated in place.
+            data (dict): Top-level parsed JSON object.
+            images_node (dict): The ``images`` sub-object from *data*, keyed
+                by image filename.
+        """
         classes = data.get("classes", [])
         if classes:
             state.class_names = list(classes)
@@ -215,7 +295,21 @@ class IOController:
             if recs:
                 state.annotations[name] = recs
 
-    def _import_coco_format(self, state, data: dict, images_node: list):
+    def _import_coco_format(self, state, data: dict, images_node: list) -> None:
+        """Populate *state* from a COCO-format JSON annotation file.
+
+        Registers any new categories into the class registry, then maps COCO
+        annotation records to per-filename polygon entries using the image ID
+        lookup. Segmentation data is expected in flattened
+        ``[x0, y0, x1, y1, …]`` format.
+
+        Args:
+            state: Dataset state object whose fields are mutated in place.
+            data (dict): Top-level parsed JSON object, expected to contain
+                ``categories`` and ``annotations`` keys.
+            images_node (list): The ``images`` list from *data*, each entry
+                containing ``id`` and ``file_name``.
+        """
         cat_map = {}
         if "categories" in data:
             for c in data["categories"]:

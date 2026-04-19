@@ -26,19 +26,50 @@ logger = logging.getLogger("MicroSentryAI.InferenceController")
 
 
 class InferenceWorker(QThread):
-    """Background thread that runs batch inference without blocking the UI."""
+    """Background thread that runs batch inference without blocking the UI.
+
+    Iterates over a list of file paths, calls the strategy's ``predict``
+    method for each, and emits the resulting score map. Supports cooperative
+    cancellation via :meth:`stop`.
+
+    Attributes:
+        strategy: Inference strategy object exposing a ``predict(path: str)``
+            method that returns ``(_, score_map: np.ndarray)``.
+        file_list (List[str]): Ordered list of absolute image paths to process.
+
+    Signals:
+        resultReady (str, object): Emitted after each successful prediction as
+            ``(absolute_path, score_map)``.
+        progress (int): Emitted after each image with the count processed so far.
+        finished (): Emitted once the loop exits, regardless of outcome.
+    """
 
     resultReady = Signal(str, object)   # (absolute_path, score_map: np.ndarray)
     progress    = Signal(int)           # count of images processed so far
     finished    = Signal()
 
-    def __init__(self, strategy, file_list: List[str]):
+    def __init__(self, strategy, file_list: List[str]) -> None:
+        """Initialize InferenceWorker with a strategy and file list.
+
+        Args:
+            strategy: Inference strategy exposing a ``predict(path: str)``
+                method.
+            file_list (List[str]): Ordered list of absolute image paths to
+                process in batch.
+        """
         super().__init__()
         self.strategy = strategy
         self.file_list = file_list
         self._running = True
 
-    def run(self):
+    def run(self) -> None:
+        """Execute inference for every path in *file_list*.
+
+        Iterates until all paths are processed or :meth:`stop` sets
+        ``_running`` to ``False``. Errors for individual images are logged
+        but do not abort the remaining batch. Always emits :attr:`finished`
+        on exit.
+        """
         for i, path in enumerate(self.file_list):
             if not self._running:
                 break
@@ -50,14 +81,32 @@ class InferenceWorker(QThread):
             self.progress.emit(i + 1)
         self.finished.emit()
 
-    def stop(self):
+    def stop(self) -> None:
+        """Request cooperative cancellation of the inference loop.
+
+        Sets an internal flag that causes :meth:`run` to exit after the
+        current image completes. Does not forcefully terminate the thread.
+        """
         self._running = False
 
 
 class InferenceController(QObject):
-    """
-    Owns the InferenceWorker lifecycle and exposes proxy signals so the View
-    never holds a direct reference to the worker thread.
+    """Own the InferenceWorker lifecycle and expose proxy signals for the View.
+
+    Manages model loading, image I/O, and worker lifecycle so the View never
+    holds a direct reference to the underlying thread. All visualisation
+    helpers are pure Python and contain zero Qt GUI dependencies.
+
+    Attributes:
+        dataset_model (DatasetTableModel): Model supplying image file metadata.
+        inference_model (InferenceModel): Model storing per-image score maps.
+
+    Signals:
+        result_ready (str, object): Proxy for :attr:`InferenceWorker.resultReady`
+            — emitted as ``(absolute_path, score_map)``.
+        progress (int): Proxy for :attr:`InferenceWorker.progress` — count of
+            images processed so far.
+        batch_done (): Emitted when the current batch finishes.
     """
 
     result_ready = Signal(str, object)  # (path, score_map)
@@ -70,7 +119,17 @@ class InferenceController(QObject):
         inference_model: InferenceModel,
         strategy_class: Optional[Type] = None,
         parent: Optional[QObject] = None,
-    ):
+    ) -> None:
+        """Initialize InferenceController.
+
+        Args:
+            dataset_model (DatasetTableModel): Model providing image metadata.
+            inference_model (InferenceModel): Model for storing score maps.
+            strategy_class (Optional[Type]): Inference strategy class to
+                instantiate on :meth:`load_model`. Defaults to
+                ``AnomalibStrategy`` when ``None``.
+            parent (Optional[QObject]): Qt parent object. Defaults to ``None``.
+        """
         super().__init__(parent)
         self.dataset_model = dataset_model
         self.inference_model = inference_model
@@ -83,7 +142,18 @@ class InferenceController(QObject):
     # ------------------------------------------------------------------ #
 
     def load_model(self, model_path: str, device: str) -> str:
-        """Load a .pt or .ckpt model. Returns model_name. Raises RuntimeError on failure."""
+        """Load a ``.pt`` or ``.ckpt`` model file and prepare the strategy.
+
+        Args:
+            model_path (str): Absolute path to the model checkpoint file.
+            device (str): Target device string (e.g. ``"cpu"``, ``"cuda"``).
+
+        Returns:
+            str: The loaded model's name as reported by the strategy.
+
+        Raises:
+            RuntimeError: If the strategy fails to load the model file.
+        """
         if self._strategy_class is None:
             from ai_strategies.anomalib_strategy import AnomalibStrategy
             strategy_class = AnomalibStrategy
@@ -97,9 +167,20 @@ class InferenceController(QObject):
         return strategy.model_name
 
     def get_model_name(self) -> str:
+        """Return the name of the currently loaded model.
+
+        Returns:
+            str: Model name string, or an empty string if no model is loaded.
+        """
         return self._strategy.model_name if self._strategy else ""
 
     def has_model(self) -> bool:
+        """Check whether a model has been successfully loaded.
+
+        Returns:
+            bool: ``True`` if a strategy with a loaded model is available,
+                ``False`` otherwise.
+        """
         return self._strategy is not None
 
     # ------------------------------------------------------------------ #
@@ -107,7 +188,15 @@ class InferenceController(QObject):
     # ------------------------------------------------------------------ #
 
     def load_image(self, path: str) -> Optional[Image.Image]:
-        """Load an image from disk. Returns PIL Image (RGB) or None on failure."""
+        """Load an image from disk as an RGB PIL Image.
+
+        Args:
+            path (str): Absolute path to the image file.
+
+        Returns:
+            Optional[Image.Image]: RGB PIL Image, or ``None`` if the file
+                cannot be read.
+        """
         try:
             return Image.open(path).convert("RGB")
         except Exception as e:
@@ -119,10 +208,16 @@ class InferenceController(QObject):
     # ------------------------------------------------------------------ #
 
     def start_batch_inference(self, file_paths: List[str]) -> None:
-        """
-        Stop any running worker, create a new one for *file_paths*, and start it.
-        The caller should connect to result_ready / progress / batch_done ONCE
-        (e.g. in the view's __init__) rather than per call.
+        """Stop any running worker and start a new batch inference job.
+
+        Connects the new worker's signals to this controller's proxy signals
+        before starting. Callers should connect to :attr:`result_ready`,
+        :attr:`progress`, and :attr:`batch_done` once (e.g. in the view's
+        ``__init__``) rather than per call.
+
+        Args:
+            file_paths (List[str]): Ordered list of absolute image paths to
+                process in this batch.
         """
         self._stop_worker()
         self._worker = InferenceWorker(self._strategy, file_paths)
@@ -131,7 +226,13 @@ class InferenceController(QObject):
         self._worker.finished.connect(self.batch_done)
         self._worker.start()
 
-    def _stop_worker(self):
+    def _stop_worker(self) -> None:
+        """Gracefully stop and clean up the current inference worker.
+
+        Blocks signals on the worker before stopping to prevent stale
+        ``resultReady`` emissions from reaching the proxy signals after
+        cancellation.
+        """
         if self._worker and self._worker.isRunning():
             self._worker.blockSignals(True)   # prevent stale signals from reaching proxies
             self._worker.stop()
@@ -153,16 +254,37 @@ class InferenceController(QObject):
         display_target: int,
         heat_min_pct: int,
     ) -> Tuple[Image.Image, Image.Image, float, tuple, Optional[np.ndarray]]:
-        """
-        Compute resized raw image and heatmap overlay. Returns smoothed score array
-        so compute_segmentation() can reuse it without re-running the Gaussian.
+        """Compute a resized raw image and a heatmap overlay composited on it.
+
+        Applies optional Gaussian smoothing to *score_map*, percentile-clips
+        and normalises it, maps it through the ``"jet"`` colormap, and
+        alpha-composites the result onto the resized source image. The
+        smoothed score array is returned so :meth:`compute_segmentation` can
+        reuse it without re-running the Gaussian.
+
+        Args:
+            pil_image (Image.Image): Source image in any PIL mode.
+            score_map (np.ndarray): 2-D anomaly score array aligned with
+                *pil_image*. Pass ``None`` to skip heatmap computation.
+            alpha (float): Heatmap overlay opacity in the range ``[0.0, 1.0]``.
+            sigma (float): Standard deviation for Gaussian smoothing applied
+                to *score_map* before normalisation. ``0`` disables smoothing.
+            display_target (int): Target size in pixels for the longer edge of
+                the output images.
+            heat_min_pct (int): Percentile (0–100) used to clip the lower tail
+                of the score distribution before normalisation.
 
         Returns:
-            left_image  — PIL Image (raw, resized to display_target)
-            right_image — PIL Image (heatmap composited on raw)
-            scale       — uniform scale factor applied (display / original)
-            offset      — (off_x, off_y) crop offset; always (0, 0) for now
-            smoothed_s  — smoothed score map ndarray, or None if score_map is None
+            Tuple[Image.Image, Image.Image, float, tuple, Optional[np.ndarray]]:
+            A five-element tuple:
+
+            - ``left_image``: Raw source resized to *display_target*.
+            - ``right_image``: Heatmap composited on the resized source.
+            - ``scale``: Uniform scale factor applied (display / original).
+            - ``offset``: ``(off_x, off_y)`` crop offset; always ``(0, 0)``.
+            - ``smoothed_s``: Smoothed score map ndarray for reuse in
+              :meth:`compute_segmentation`, or ``None`` if *score_map* is
+              ``None``.
         """
         w, h = pil_image.size
         scale = display_target / max(w, h)
@@ -202,11 +324,28 @@ class InferenceController(QObject):
         display_w: int,
         display_h: int,
     ) -> list:
-        """
-        Compute polygon contours from a smoothed score map at the given percentile threshold.
+        """Compute polygon contours from a smoothed score map at a percentile threshold.
+
+        Thresholds *smoothed_s* at the *seg_pct* percentile, resizes the
+        resulting binary mask to display dimensions, applies one round of
+        erosion to reduce noise, then extracts simplified external contours
+        via Douglas-Peucker approximation.
+
+        Args:
+            smoothed_s (Optional[np.ndarray]): Smoothed 2-D score map as
+                returned by :meth:`compute_heatmap`. Returns ``[]``
+                immediately when ``None``.
+            seg_pct (int): Percentile threshold (0–100) applied to
+                *smoothed_s* to produce the binary segmentation mask.
+            epsilon (float): Douglas-Peucker approximation tolerance in
+                pixels. Larger values produce fewer vertices per contour.
+            display_w (int): Target width in pixels for the resized mask.
+            display_h (int): Target height in pixels for the resized mask.
 
         Returns:
-            contours — list of [(x, y), ...] point lists in display coordinates
+            list: List of contours, where each contour is a list of
+                ``(x, y)`` float tuples in display coordinates. Contours
+                with fewer than three points are discarded.
         """
         if smoothed_s is None:
             return []
@@ -243,7 +382,29 @@ class InferenceController(QObject):
         seg_pct: int,
         epsilon: float,
     ) -> Tuple[Image.Image, Image.Image, list, float, tuple]:
-        """Compatibility shim — delegates to compute_heatmap + compute_segmentation."""
+        """Compute heatmap and segmentation contours in a single call.
+
+        Compatibility shim that delegates to :meth:`compute_heatmap` followed
+        by :meth:`compute_segmentation` and returns their combined outputs.
+
+        Args:
+            pil_image (Image.Image): Source image in any PIL mode.
+            score_map (np.ndarray): 2-D anomaly score array aligned with
+                *pil_image*.
+            alpha (float): Heatmap overlay opacity in the range ``[0.0, 1.0]``.
+            sigma (float): Standard deviation for Gaussian smoothing. ``0``
+                disables smoothing.
+            display_target (int): Target size in pixels for the longer edge.
+            heat_min_pct (int): Percentile used to clip the lower score tail.
+            seg_pct (int): Percentile threshold for the segmentation mask.
+            epsilon (float): Douglas-Peucker approximation tolerance in pixels.
+
+        Returns:
+            Tuple[Image.Image, Image.Image, list, float, tuple]: A five-element
+            tuple of ``(left_image, right_image, contours, scale, offset)``
+            as described in :meth:`compute_heatmap` and
+            :meth:`compute_segmentation`.
+        """
         left_pil, right_pil, scale, offset, s = self.compute_heatmap(
             pil_image, score_map, alpha, sigma, display_target, heat_min_pct
         )

@@ -11,25 +11,33 @@ from PySide6.QtGui import QMouseEvent, QKeyEvent
 
 
 class SidebarHandle(QSplitterHandle):
-    """
-    A Custom Splitter Handle that supports hover effects and double-click toggling.
+    """Custom splitter handle with hover effects and double-click collapse/expand.
+
+    Replaces the default :class:`~PySide6.QtWidgets.QSplitterHandle` so that
+    QSS ``:hover`` selectors work and the sidebar can be toggled by
+    double-clicking the divider.
     """
 
-    def __init__(self, orientation: Qt.Orientation, parent: QSplitter):
-        """
-        Initialize the handle and enable hover attributes.
+    def __init__(self, orientation: Qt.Orientation, parent: QSplitter) -> None:
+        """Initialize the handle and enable hover attribute for QSS styling.
 
         Args:
-            orientation (Qt.Orientation): The orientation of the splitter.
-            parent (QSplitter): The parent splitter widget.
+            orientation (Qt.Orientation): Orientation of the parent splitter.
+            parent (QSplitter): The splitter that owns this handle.
         """
         super().__init__(orientation, parent)
         # Enable hover attribute so that QSS :hover selectors work correctly
         self.setAttribute(Qt.WA_Hover, True)
 
-    def mouseDoubleClickEvent(self, event: QMouseEvent):
-        """
-        Toggles the visibility of the sidebar (second widget) on double-click.
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
+        """Toggle the sidebar (second splitter widget) open or closed.
+
+        Collapses the sidebar to zero width on the first double-click, saving
+        the current width so it can be restored. Expands it back to the saved
+        width (or ``400`` px as a fallback) on the next double-click.
+
+        Args:
+            event (QMouseEvent): The mouse double-click event.
         """
         splitter = self.splitter()
         sizes = splitter.sizes()
@@ -56,26 +64,31 @@ class SidebarHandle(QSplitterHandle):
 
 
 class CustomSplitter(QSplitter):
-    """
-    A QSplitter subclass that utilizes the SidebarHandle for enhanced interaction.
-    """
+    """QSplitter subclass that provides a :class:`SidebarHandle` for each divider."""
 
     def createHandle(self) -> QSplitterHandle:
-        """Overrides the default handle creation to use SidebarHandle."""
+        """Create a :class:`SidebarHandle` instead of the default handle.
+
+        Returns:
+            QSplitterHandle: A new :class:`SidebarHandle` bound to this
+                splitter's orientation.
+        """
         return SidebarHandle(self.orientation(), self)
 
 
 class WrappingTableWidget(QTableWidget):
-    """
-    A QTableWidget that implements cyclic selection navigation.
+    """QTableWidget with cyclic keyboard navigation.
 
-    Pressing 'Down' on the last row wraps to the first row.
-    Pressing 'Up' on the first row wraps to the last row.
+    Pressing ``Down`` on the last row wraps to the first row.
+    Pressing ``Up`` on the first row wraps to the last row.
+    All other keys fall through to the default implementation.
     """
 
-    def keyPressEvent(self, event: QKeyEvent):
-        """
-        Handles key press events to enforce cyclic navigation.
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        """Handle key press events, wrapping Up/Down navigation at the boundaries.
+
+        Args:
+            event (QKeyEvent): The key press event to handle.
         """
         if event.key() == Qt.Key_Down:
             # If on the last row, jump to top

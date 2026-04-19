@@ -1,8 +1,14 @@
 import sys
 import logging
 
-def setup_logging():
-    """Configures root logger for the application"""
+def setup_logging() -> None:
+    """Configure the root logger for the application.
+
+    Selects log level based on execution context: ``CRITICAL`` for compiled
+    (frozen) executables and ``DEBUG`` for development runs. All messages
+    are emitted to ``stdout`` with a timestamp, level, module, and
+    line-number prefix.
+    """
     is_compiled = getattr(sys, 'frozen', False)
 
     log_level = logging.CRITICAL if is_compiled else logging.DEBUG

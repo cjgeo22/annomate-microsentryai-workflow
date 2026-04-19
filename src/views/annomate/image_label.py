@@ -32,12 +32,44 @@ POLYGON = "polygon"
 
 
 class ImageLabel(QLabel):
-    polygonFinished = Signal(list)   # pts: List[Tuple[float, float]] in original coords
-    polygonEdited   = Signal(int, list)  # (polygon_idx, pts in original coords)
-    polygonSelected = Signal(int)    # polygon index (-1 for deselect)
-    toolCanceled    = Signal()       # Escape pressed while polygon tool active
+    """Custom QLabel for image display with zoom, pan, and polygon annotation.
 
-    def __init__(self, parent=None):
+    Handles rendering of a BGR image alongside existing annotation overlays
+    and supports interactive polygon drawing, vertex dragging, and whole-polygon
+    dragging. All coordinates reported via signals are in the original (unscaled)
+    image coordinate system.
+
+    Attributes:
+        current_tool (Optional[str]): Active tool name; ``"polygon"`` or ``None``.
+        current_polygon_points (List[QPointF]): In-progress polygon vertices in
+            display (scaled) coordinates.
+        selected_polygon_idx (int): Index of the currently selected overlay polygon,
+            or ``-1`` when none is selected.
+        editing_polygon_idx (int): Index of the overlay polygon in vertex-edit mode,
+            or ``-1`` when not editing.
+        dragging_vertex_idx (int): Index of the vertex being dragged, or ``-1``.
+
+    Signals:
+        polygonFinished (list): Emitted when the user completes a polygon. Carries
+            ``List[Tuple[float, float]]`` in original image coordinates.
+        polygonEdited (int, list): Emitted after a vertex or polygon drag completes.
+            Carries ``(polygon_idx, List[Tuple[float, float]])`` in original coords.
+        polygonSelected (int): Emitted when a polygon is clicked. Carries its index,
+            or ``-1`` on deselect.
+        toolCanceled (): Emitted when ``Escape`` is pressed while a tool is active.
+    """
+
+    polygonFinished = Signal(list)        # pts: List[Tuple[float, float]] in original coords
+    polygonEdited   = Signal(int, list)   # (polygon_idx, pts in original coords)
+    polygonSelected = Signal(int)         # polygon index (-1 for deselect)
+    toolCanceled    = Signal()            # Escape pressed while polygon tool active
+
+    def __init__(self, parent: object = None) -> None:
+        """Initialize ImageLabel with default zoom, pan, and annotation state.
+
+        Args:
+            parent (object): Optional Qt parent widget. Defaults to ``None``.
+        """
         super().__init__(parent)
         self.setMouseTracking(True)
         self.setScaledContents(False)
@@ -67,11 +99,22 @@ class ImageLabel(QLabel):
         self.dragging_vertex_idx: int = -1
         self._dragging_polygon: bool = False
 
-    def set_image(self, bgr: np.ndarray, max_display_dim: int = 1200):
-        """Receive a pre-loaded BGR ndarray and prepare it for display.
+    def set_image(self, bgr: np.ndarray, max_display_dim: int = 1200) -> None:
+        """Load a BGR ndarray and prepare it for display.
 
-        The caller (Controller) is responsible for reading the file from disk.
-        This widget only handles rendering.
+        Computes a ``_base_scale`` that fits the image within *max_display_dim*
+        pixels on its longest edge, converts to RGB, and stores a
+        :class:`~PySide6.QtGui.QPixmap` for painting. Resets all in-progress
+        annotation and view state (zoom, pan, overlays).
+
+        The caller (controller) is responsible for reading the file from disk;
+        this widget only handles rendering.
+
+        Args:
+            bgr (np.ndarray): Source image in BGR format as returned by
+                ``cv2.imread``.
+            max_display_dim (int): Maximum pixel length of the longer image
+                edge at ``zoom == 1``. Defaults to ``1200``.
         """
         self._orig_image_bgr = bgr
         h, w = bgr.shape[:2]
@@ -112,13 +155,35 @@ class ImageLabel(QLabel):
 
         self.update()
 
-    def set_tool(self, tool_name: Optional[str]):
+    def set_tool(self, tool_name: Optional[str]) -> None:
+        """Set the active interaction tool.
+
+        Args:
+            tool_name (Optional[str]): Tool identifier — ``"polygon"`` to
+                enable polygon drawing, or ``None`` to deactivate all tools.
+        """
         self.current_tool = tool_name
 
-    def set_active_color(self, color: QColor):
+    def set_active_color(self, color: QColor) -> None:
+        """Set the stroke color used when drawing a new polygon.
+
+        Args:
+            color (QColor): Desired color. Falls back to ``QColor(0, 200, 0)``
+                if *color* is not a valid :class:`~PySide6.QtGui.QColor`.
+        """
         self._active_color = color if isinstance(color, QColor) else QColor(0, 200, 0)
 
-    def set_overlays(self, poly_list: List[Tuple[List[Tuple[float, float]], QColor]]):
+    def set_overlays(self, poly_list: List[Tuple[List[Tuple[float, float]], QColor]]) -> None:
+        """Replace all rendered overlay polygons.
+
+        Converts each polygon from original image coordinates to display
+        (base-scaled) coordinates and triggers a repaint.
+
+        Args:
+            poly_list (List[Tuple[List[Tuple[float, float]], QColor]]): List of
+                ``(points, color)`` pairs where *points* is a list of
+                ``(x, y)`` tuples in original image coordinates.
+        """
         self._overlays = []
         for pts_orig, color in poly_list:
             disp_pts = [
@@ -128,24 +193,53 @@ class ImageLabel(QLabel):
             self._overlays.append((disp_pts, color))
         self.update()
 
-    def clear_current_polygon(self):
+    def clear_current_polygon(self) -> None:
+        """Discard all in-progress polygon vertices and repaint."""
         self.current_polygon_points.clear()
         self.update()
 
     def is_dragging(self) -> bool:
-        """True while a vertex or polygon drag is in progress."""
+        """Return whether a vertex or polygon drag is currently in progress.
+
+        Returns:
+            bool: ``True`` if a vertex drag or whole-polygon drag is active.
+        """
         return self.dragging_vertex_idx != -1 or self._dragging_polygon
 
     def view_to_display(self, p_view: QPointF) -> QPointF:
+        """Convert a point from view (widget) coordinates to display coordinates.
+
+        Display coordinates are the pixel space of the stored
+        :class:`~PySide6.QtGui.QPixmap` before zoom is applied.
+
+        Args:
+            p_view (QPointF): Point in widget pixel coordinates.
+
+        Returns:
+            QPointF: Corresponding point in display (pixmap) coordinates.
+        """
         return QPointF(
             (p_view.x() - self._pan.x()) / self._zoom,
             (p_view.y() - self._pan.y()) / self._zoom
         )
 
     def display_to_original(self, p_disp: QPointF) -> Tuple[float, float]:
+        """Convert a point from display coordinates to original image coordinates.
+
+        Args:
+            p_disp (QPointF): Point in display (pixmap) coordinates.
+
+        Returns:
+            Tuple[float, float]: ``(x, y)`` in the original unscaled image.
+        """
         return (p_disp.x() / self._base_scale, p_disp.y() / self._base_scale)
 
-    def finish_current_polygon(self):
+    def finish_current_polygon(self) -> None:
+        """Emit :attr:`polygonFinished` with the current polygon and clear it.
+
+        Converts all in-progress display-coordinate vertices to original image
+        coordinates before emitting. Does nothing if no points have been added.
+        """
         if self.current_polygon_points:
             pts_orig = [
                 self.display_to_original(p) for p in self.current_polygon_points
@@ -155,7 +249,15 @@ class ImageLabel(QLabel):
         self.current_polygon_points.clear()
         self.update()
 
-    def keyPressEvent(self, event: QKeyEvent):
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        """Handle keyboard shortcuts for polygon drawing.
+
+        - ``Escape``: cancel the active tool and clear in-progress points.
+        - ``Backspace`` (polygon tool): remove the last placed vertex.
+
+        Args:
+            event (QKeyEvent): The key press event.
+        """
         if event.key() == Qt.Key_Escape:
             self.clear_current_polygon()
             self.set_tool(None)
@@ -169,7 +271,15 @@ class ImageLabel(QLabel):
                 return
         super().keyPressEvent(event)
 
-    def mouseDoubleClickEvent(self, event: QMouseEvent):
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
+        """Finish the current polygon or enter vertex-edit mode on double-click.
+
+        - While drawing (polygon tool active): finishes and emits the polygon.
+        - Otherwise: enters edit mode for the top-most polygon under the cursor.
+
+        Args:
+            event (QMouseEvent): The mouse double-click event.
+        """
         if self.current_tool == POLYGON and self.current_polygon_points:
             self.finish_current_polygon()
             return
@@ -192,7 +302,23 @@ class ImageLabel(QLabel):
 
         super().mouseDoubleClickEvent(event)
 
-    def mousePressEvent(self, event: QMouseEvent):
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        """Handle left-click (add vertex / select / drag) and right-click (pan).
+
+        Left button behaviour depends on active mode:
+
+        1. Edit mode — nearest vertex within 10 px begins a vertex drag;
+           clicking inside the polygon body begins a polygon drag; clicking
+           outside exits edit mode.
+        2. Polygon tool — appends a point to the in-progress polygon.
+        3. Normal — selects the top-most polygon under the cursor and begins
+           a polygon drag if one was found.
+
+        Right button initiates panning.
+
+        Args:
+            event (QMouseEvent): The mouse press event.
+        """
         self.setFocus()
 
         if event.button() == Qt.LeftButton:
@@ -260,7 +386,12 @@ class ImageLabel(QLabel):
             self._panning = True
             self._last_mouse_pos = QPointF(event.pos())
 
-    def mouseMoveEvent(self, event: QMouseEvent):
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        """Update vertex drag, polygon drag, pan, or crosshair cursor on move.
+
+        Args:
+            event (QMouseEvent): The mouse move event.
+        """
         self._mouse_pos = QPointF(event.pos())
 
         if self.dragging_vertex_idx != -1 and self.editing_polygon_idx != -1:
@@ -312,7 +443,15 @@ class ImageLabel(QLabel):
 
         super().mouseMoveEvent(event)
 
-    def mouseReleaseEvent(self, event: QMouseEvent):
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        """Commit a vertex or polygon drag and emit :attr:`polygonEdited`.
+
+        Resets drag flags before emitting so that ``is_dragging()`` returns
+        ``False`` by the time connected slots react.
+
+        Args:
+            event (QMouseEvent): The mouse release event.
+        """
         if event.button() == Qt.LeftButton:
             # Commit Vertex Drag — reset flag BEFORE emitting so on_model_data_changed
             # sees is_dragging() == False and can safely refresh overlays.
@@ -338,8 +477,15 @@ class ImageLabel(QLabel):
             self._panning = False
             self._last_mouse_pos = None
 
-    def wheelEvent(self, event: QWheelEvent):
-        """Mathematically precise cursor-anchored zoom."""
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        """Perform cursor-anchored zoom in response to the scroll wheel.
+
+        Clamps the scroll delta to ±5 steps and applies a ``1.15``-per-step
+        zoom factor, keeping the point under the cursor stationary.
+
+        Args:
+            event (QWheelEvent): The wheel event carrying angle delta.
+        """
         if self._display_qpix is None:
             return
 
@@ -363,19 +509,30 @@ class ImageLabel(QLabel):
         )
         self.update()
 
-    def zoom_in(self):
+    def zoom_in(self) -> None:
+        """Zoom in by one step (factor ``1.15``), anchored at the widget center."""
         self._apply_zoom(1.15)
 
-    def zoom_out(self):
+    def zoom_out(self) -> None:
+        """Zoom out by one step (factor ``1 / 1.15``), anchored at the widget center."""
         self._apply_zoom(1 / 1.15)
 
-    def reset_view(self):
+    def reset_view(self) -> None:
+        """Reset zoom to ``1.0`` and pan to the origin, then repaint."""
         self._zoom = 1.0
         self._pan = QPointF(0, 0)
         self.update()
 
-    def _apply_zoom(self, factor: float):
-        """Button-based zoom targeted precisely at the center of the widget."""
+    def _apply_zoom(self, factor: float) -> None:
+        """Apply a zoom *factor* anchored at the center of the widget.
+
+        Adjusts :attr:`_pan` so the center point stays fixed after the zoom.
+        Clamps zoom to the range ``[0.2, 8.0]``.
+
+        Args:
+            factor (float): Multiplicative zoom change (e.g. ``1.15`` to
+                zoom in, ``1 / 1.15`` to zoom out).
+        """
         if self._display_qpix is None:
             return
 
@@ -390,7 +547,16 @@ class ImageLabel(QLabel):
         )
         self.update()
 
-    def paintEvent(self, event: QPaintEvent):
+    def paintEvent(self, event: QPaintEvent) -> None:
+        """Paint the image, annotation overlays, and the in-progress polygon.
+
+        Applies pan and zoom transforms before drawing the pixmap, then draws
+        each overlay polygon with selection/edit highlighting. Finally draws
+        the rubber-band line from the last placed vertex to the cursor.
+
+        Args:
+            event (QPaintEvent): The paint event (used by the Qt framework).
+        """
         painter = QPainter(self)
         if self._display_qpix is None:
             return

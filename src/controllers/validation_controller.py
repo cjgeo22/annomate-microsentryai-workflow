@@ -31,13 +31,27 @@ logger = logging.getLogger("Validation.Controller")
 # ---------------------------------------------------------------------------
 
 def get_robust_id(filename: str) -> str:
-    """
-    Extracts a stable identifier used to match JSON keys to GT/prediction masks.
+    """Extract a stable identifier used to match JSON keys to GT/prediction masks.
 
-    Handles formats such as:
-      '118_images_003_01-25-26_poly.jpg' → '118_003'
-      'hole_003_02-16-26_poly.jpg'       → '003'
-      '003_binary_mask.png'              → '003'
+    Applies a series of regex patterns in priority order so that a variety of
+    real-world filename conventions map to a consistent key.
+
+    Patterns tried in order:
+
+    1. ``<num>_images_<num>`` → ``"<num>_<num>"``
+       (e.g. ``118_images_003_01-25-26_poly.jpg`` → ``"118_003"``)
+    2. ``_<3+digits>_``       → the captured digits
+       (e.g. ``hole_003_02-16-26_poly.jpg`` → ``"003"``)
+    3. Two or more groups of 3+ digits → ``"<first>_<second>"``
+    4. One group of 3+ digits → that group alone
+    5. First digit sequence anywhere in the name
+    6. Bare stem (no extension)
+
+    Args:
+        filename (str): Basename or full path of the file to identify.
+
+    Returns:
+        str: Stable identifier string derived from *filename*.
     """
     m = re.search(r"(\d+)_images_(\d+)", filename)
     if m:
@@ -65,19 +79,48 @@ def get_robust_id(filename: str) -> str:
 # ---------------------------------------------------------------------------
 
 class MaskGenWorker(QThread):
-    """Parses JSON annotations and writes binary mask PNGs for each image."""
+    """Background thread that parses JSON annotations and writes binary mask PNGs.
+
+    Reads polygon annotations from a VIA-style or custom JSON file, renders
+    each annotated polygon onto a blank canvas sized to the source image, and
+    saves the result as a binary PNG mask. Emits progress and log signals
+    throughout.
+
+    Attributes:
+        input_dir (str): Directory containing the source images.
+        json_path (str): Path to the JSON annotation file.
+        output_dir (str): Directory where binary mask PNGs are written.
+
+    Signals:
+        progress (int): Emitted after each image with a 0–100 completion %.
+        log_message (str): Emitted for informational, warning, and error text.
+        finished (): Emitted once the worker exits, regardless of outcome.
+    """
 
     progress    = Signal(int)   # 0–100
     log_message = Signal(str)
     finished    = Signal()
 
-    def __init__(self, input_dir: str, json_path: str, output_dir: str):
+    def __init__(self, input_dir: str, json_path: str, output_dir: str) -> None:
+        """Initialize MaskGenWorker with paths needed for mask generation.
+
+        Args:
+            input_dir (str): Directory containing the source images.
+            json_path (str): Path to the JSON annotation file.
+            output_dir (str): Directory where binary mask PNGs will be written.
+        """
         super().__init__()
         self.input_dir  = input_dir
         self.json_path  = json_path
         self.output_dir = output_dir
 
-    def run(self):
+    def run(self) -> None:
+        """Execute mask generation for all images in *input_dir*.
+
+        Matches each image file to a JSON entry via :func:`get_robust_id`,
+        renders annotated polygons to a binary mask, and saves the result.
+        Always emits :attr:`finished` on exit, even when an error occurs.
+        """
         try:
             os.makedirs(self.output_dir, exist_ok=True)
 
@@ -172,20 +215,55 @@ class MaskGenWorker(QThread):
 
 
 class EvaluationWorker(QThread):
-    """Compares GT masks against prediction masks and writes overlay images."""
+    """Background thread that compares GT masks against prediction masks.
+
+    For each ground-truth mask, locates the corresponding prediction mask
+    using :func:`get_robust_id`, runs
+    :class:`~core.logic.mask_comparator.MaskComparator`, saves the overlay
+    image, and emits per-match metric signals. Writes an
+    ``evaluation_log.txt`` to *out_dir* on completion.
+
+    Attributes:
+        gt_dir (str): Directory containing ground-truth binary mask images.
+        pred_dir (str): Directory containing prediction binary mask images.
+        out_dir (str): Directory where overlay PNGs and the log are written.
+
+    Signals:
+        progress (int): Emitted after each GT image with a 0–100 completion %.
+        log_message (str): Emitted for status, warning, and error messages.
+        match_found (str, str, float): Emitted for each successful match as
+            ``(overlay_image_path, display_text, iou)``.
+        finished (): Emitted once the worker exits, regardless of outcome.
+    """
 
     progress    = Signal(int)           # 0–100
     log_message = Signal(str)
     match_found = Signal(str, str, float)  # (overlay_image_path, display_text, iou)
     finished    = Signal()
 
-    def __init__(self, gt_dir: str, pred_dir: str, out_dir: str):
+    def __init__(self, gt_dir: str, pred_dir: str, out_dir: str) -> None:
+        """Initialize EvaluationWorker with paths needed for mask evaluation.
+
+        Args:
+            gt_dir (str): Directory containing ground-truth binary mask images.
+            pred_dir (str): Directory containing prediction binary mask images.
+            out_dir (str): Directory where overlay PNGs and the log are written.
+        """
         super().__init__()
         self.gt_dir   = gt_dir
         self.pred_dir = pred_dir
         self.out_dir  = out_dir
 
-    def run(self):
+    def run(self) -> None:
+        """Execute evaluation for all ground-truth masks found in *gt_dir*.
+
+        Builds a prediction lookup map keyed by robust ID, then iterates
+        sorted GT files, thresholds and optionally resizes masks to match GT
+        dimensions, computes metrics via
+        :class:`~core.logic.mask_comparator.MaskComparator`, and writes an
+        ``evaluation_log.txt`` to *out_dir*. Always emits :attr:`finished` on
+        exit, even when an error occurs.
+        """
         try:
             outline_color = (0, 0, 255)
             thickness     = 2
@@ -276,21 +354,40 @@ class EvaluationWorker(QThread):
 # ---------------------------------------------------------------------------
 
 class ValidationController:
-    """
-    Headless orchestration for the two-step validation workflow.
-    Creates and returns workers; caller (View) connects signals and calls start().
+    """Headless orchestration for the two-step validation workflow.
+
+    Creates and returns :class:`MaskGenWorker` or :class:`EvaluationWorker`
+    instances pre-configured from the model's current paths. The caller
+    (View) is responsible for connecting signals and calling ``start()``.
+
+    Attributes:
+        model (ValidationModel): Data model supplying the path configuration.
     """
 
-    def __init__(self, model: ValidationModel):
+    def __init__(self, model: ValidationModel) -> None:
+        """Initialize ValidationController with a bound ValidationModel.
+
+        Args:
+            model (ValidationModel): Data model supplying paths for both the
+                mask generation and evaluation workflows.
+        """
         self.model = model
         self._gen_worker:  Optional[MaskGenWorker]   = None
         self._eval_worker: Optional[EvaluationWorker] = None
 
     def start_generation(self) -> MaskGenWorker:
-        """
-        Build and return a MaskGenWorker from current model paths.
-        Raises ValueError if required paths are not set.
-        Stops any previously running generation worker first.
+        """Build and return a MaskGenWorker from current model paths.
+
+        Stops any previously running generation worker before creating a new
+        one, ensuring only one generation job runs at a time.
+
+        Returns:
+            MaskGenWorker: A new, un-started worker pre-configured with the
+                model's polygon source, JSON annotation, and mask output paths.
+
+        Raises:
+            ValueError: If ``model.can_generate()`` returns ``False`` — i.e.
+                the images folder, JSON file, or mask output folder is unset.
         """
         if not self.model.can_generate():
             raise ValueError(
@@ -305,10 +402,18 @@ class ValidationController:
         return self._gen_worker
 
     def start_evaluation(self) -> EvaluationWorker:
-        """
-        Build and return an EvaluationWorker from current model paths.
-        Raises ValueError if required paths are not set.
-        Stops any previously running evaluation worker first.
+        """Build and return an EvaluationWorker from current model paths.
+
+        Stops any previously running evaluation worker before creating a new
+        one, ensuring only one evaluation job runs at a time.
+
+        Returns:
+            EvaluationWorker: A new, un-started worker pre-configured with
+                the model's GT, prediction, and evaluation output paths.
+
+        Raises:
+            ValueError: If ``model.can_evaluate()`` returns ``False`` — i.e.
+                the ground truth or predictions folder is unset.
         """
         if not self.model.can_evaluate():
             raise ValueError(
@@ -323,7 +428,13 @@ class ValidationController:
         return self._eval_worker
 
     @staticmethod
-    def _stop(worker: Optional[QThread]):
+    def _stop(worker: Optional[QThread]) -> None:
+        """Gracefully stop a QThread worker if it is currently running.
+
+        Args:
+            worker (Optional[QThread]): The worker thread to stop, or ``None``
+                (in which case this method is a no-op).
+        """
         if worker and worker.isRunning():
             worker.quit()
             worker.wait()
