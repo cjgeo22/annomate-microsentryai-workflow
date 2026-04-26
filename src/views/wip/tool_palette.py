@@ -36,6 +36,7 @@ class ToolPalette(QFrame):
         self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
 
         self._btn_tool: dict = {}
+        self._active_tool: str = ""
         self._btn_group = QButtonGroup(self)
         self._btn_group.setExclusive(True)
 
@@ -61,10 +62,17 @@ class ToolPalette(QFrame):
         self._btn_group.buttonClicked.connect(self._on_btn_clicked)
 
     def _on_btn_clicked(self, btn: QToolButton) -> None:
-        self.tool_selected.emit(self._btn_tool.get(btn, ""))
+        tool_name = self._btn_tool.get(btn, "")
+        if tool_name == self._active_tool:
+            self.deselect_all()
+            self.tool_selected.emit("")
+        else:
+            self._active_tool = tool_name
+            self.tool_selected.emit(tool_name)
 
     def deselect_all(self) -> None:
         """Uncheck all tool buttons (called when the canvas cancels a tool)."""
+        self._active_tool = ""
         self._btn_group.setExclusive(False)
         for btn in self._btn_tool:
             btn.setChecked(False)
