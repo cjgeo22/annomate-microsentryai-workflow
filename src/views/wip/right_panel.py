@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QWidget, QFrame, QVBoxLayout, QHBoxLayout, QLabel,
     QListWidget, QListWidgetItem,
     QPushButton, QScrollArea, QSizePolicy, QToolButton,
-    QMenu, QInputDialog, QMessageBox, QColorDialog,
+    QInputDialog, QMessageBox, QColorDialog,
 )
 
 
@@ -117,17 +117,19 @@ class DataNavigatorSection(QWidget):
         nav_h.setContentsMargins(0, 0, 0, 0)
         nav_h.setSpacing(4)
 
-        btn_prev = QToolButton()
-        btn_prev.setText("‹")
-        btn_prev.setToolTip("Previous image")
-        btn_prev.clicked.connect(self.prev_requested)
-        nav_h.addWidget(btn_prev)
+        self._btn_prev = QToolButton()
+        self._btn_prev.setText("‹ Prev")
+        self._btn_prev.setToolTip("Previous image")
+        self._btn_prev.clicked.connect(self.prev_requested)
+        self._btn_prev.setVisible(False)
+        nav_h.addWidget(self._btn_prev)
 
-        btn_next = QToolButton()
-        btn_next.setText("›")
-        btn_next.setToolTip("Next image")
-        btn_next.clicked.connect(self.next_requested)
-        nav_h.addWidget(btn_next)
+        self._btn_next = QToolButton()
+        self._btn_next.setText("Next ›")
+        self._btn_next.setToolTip("Next image")
+        self._btn_next.clicked.connect(self.next_requested)
+        self._btn_next.setVisible(False)
+        nav_h.addWidget(self._btn_next)
 
         self._lbl_counter = QLabel("No images loaded")
         self._lbl_counter.setStyleSheet("color: black;")
@@ -169,6 +171,8 @@ class DataNavigatorSection(QWidget):
 
         total = self.dataset_model.rowCount()
         has_images = total > 0
+        self._btn_prev.setVisible(has_images)
+        self._btn_next.setVisible(has_images)
         self._legend.setVisible(has_images)
         self.list_widget.setVisible(has_images)
 
@@ -228,46 +232,69 @@ class DataNavigatorSection(QWidget):
 # ======================================================================= #
 
 class _ClassRow(QWidget):
-    """One selectable row: colored dot + class name + annotation count.
+    """One selectable row: color swatch | class name | per-image count | total count | trash.
 
-    Selection is highlighted using QPalette.Highlight (OS theme color).
-    Right-click emits delete_requested so the parent can handle deletion.
+    Clicking the swatch opens QColorDialog to change the class color.
+    The trash button deletes the class immediately.
+    Selection background uses QPalette.Highlight (OS-adaptive).
 
     Signals:
-        row_clicked (str): class name when the row is pressed.
-        delete_requested (str): class name when "Delete" is chosen from context menu.
+        row_clicked (str): class name when the row body is pressed.
+        delete_requested (str): emitted when the trash button is clicked.
+        color_changed (str, int, int, int): name + new (r, g, b) after swatch dialog.
     """
 
     row_clicked      = Signal(str)
     delete_requested = Signal(str)
+    color_changed    = Signal(str, int, int, int)
 
-    def __init__(self, name: str, r: int, g: int, b: int, count: int,
+    _COUNT_W = 40
+    _SWATCH_W = 33
+
+    def __init__(self, name: str, r: int, g: int, b: int,
+                 per_image_count: int, total_count: int,
                  parent: QWidget = None) -> None:
         super().__init__(parent)
         self._name = name
+        self._color = (r, g, b)
         self._original_palette = QPalette(self.palette())
         self.setCursor(Qt.PointingHandCursor)
-        self.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.customContextMenuRequested.connect(self._on_context_menu)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(6, 4, 6, 4)
-        layout.setSpacing(6)
+        layout.setContentsMargins(6, 3, 6, 3)
+        layout.setSpacing(8)
 
-        # Colored dot — V4: (r,g,b) → inline QSS at draw boundary
-        dot = QLabel("●")
-        dot.setStyleSheet(f"color: rgb({r},{g},{b}); font-size: 14px;")
-        dot.setFixedWidth(18)
-        layout.addWidget(dot)
+        self._swatch = QToolButton()
+        self._swatch.setFixedSize(self._SWATCH_W, self._SWATCH_W)
+        self._swatch.setToolTip("Change color")
+        self._swatch.setStyleSheet(
+            f"background-color: rgb({r},{g},{b}); border: 1px solid gray; border-radius: 3px;"
+        )
+        self._swatch.clicked.connect(self._on_swatch_clicked)
+        layout.addWidget(self._swatch)
 
         layout.addWidget(QLabel(name), stretch=1)
 
-        self._count_lbl = QLabel(str(count))
-        self._count_lbl.setStyleSheet("font-size: 10px;")
-        layout.addWidget(self._count_lbl)
+        self._image_lbl = QLabel(str(per_image_count))
+        self._image_lbl.setFixedWidth(self._COUNT_W)
+        self._image_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        layout.addWidget(self._image_lbl)
 
-    def update_count(self, count: int) -> None:
-        self._count_lbl.setText(str(count))
+        self._total_lbl = QLabel(str(total_count))
+        self._total_lbl.setFixedWidth(self._COUNT_W)
+        self._total_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        layout.addWidget(self._total_lbl)
+
+        trash = QToolButton()
+        trash.setText("🗑")
+        trash.setFixedSize(28, 28)
+        trash.setToolTip(f'Delete "{name}"')
+        trash.clicked.connect(lambda: self.delete_requested.emit(self._name))
+        layout.addWidget(trash)
+
+    def update_counts(self, per_image: int, total: int) -> None:
+        self._image_lbl.setText(str(per_image))
+        self._total_lbl.setText(str(total))
 
     def set_selected(self, selected: bool) -> None:
         if selected:
@@ -284,11 +311,16 @@ class _ClassRow(QWidget):
         self.row_clicked.emit(self._name)
         super().mousePressEvent(event)
 
-    def _on_context_menu(self, pos) -> None:
-        menu = QMenu(self)
-        action = menu.addAction(f'Delete "{self._name}"')
-        if menu.exec(self.mapToGlobal(pos)) == action:
-            self.delete_requested.emit(self._name)
+    def _on_swatch_clicked(self) -> None:
+        color = QColorDialog.getColor(QColor(*self._color), self, "Change Class Color")
+        if not color.isValid():
+            return
+        r, g, b = color.red(), color.green(), color.blue()
+        self._color = (r, g, b)
+        self._swatch.setStyleSheet(
+            f"background-color: rgb({r},{g},{b}); border: 1px solid gray; border-radius: 3px;"
+        )
+        self.color_changed.emit(self._name, r, g, b)
 
 
 class ClassesSection(QWidget):
@@ -310,6 +342,7 @@ class ClassesSection(QWidget):
         self._class_names: list = []
         self._rows: dict = {}        # name → _ClassRow
         self._selected_name: str = ""
+        self._current_row: int = -1
         self._init_ui()
         self.dataset_model.dataChanged.connect(self._on_data_changed)
 
@@ -317,6 +350,43 @@ class ClassesSection(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
+
+        # Column headers
+        header = QWidget()
+        header_h = QHBoxLayout(header)
+        header_h.setContentsMargins(6, 2, 6, 2)
+        header_h.setSpacing(6)
+
+        lbl_color = QLabel("Color")
+        lbl_color.setFixedWidth(_ClassRow._SWATCH_W)
+        lbl_color.setStyleSheet("font-size: 12px; font-weight: bold;")
+        header_h.addWidget(lbl_color)
+
+        lbl_class = QLabel("Class")
+        lbl_class.setStyleSheet("font-size: 12px; font-weight: bold;")
+        header_h.addWidget(lbl_class, stretch=0)
+
+        lbl_image = QLabel("Image")
+        lbl_image.setFixedWidth(_ClassRow._COUNT_W)
+        lbl_image.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        lbl_image.setStyleSheet("font-size: 12px; font-weight: bold;")
+        header_h.addWidget(lbl_image)
+
+        lbl_total = QLabel("Total")
+        lbl_total.setFixedWidth(_ClassRow._COUNT_W)
+        lbl_total.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        lbl_total.setStyleSheet("font-size: 12px; font-weight: bold;")
+        header_h.addWidget(lbl_total)
+
+        # spacer to align with trash button column
+        header_h.addSpacing(28 + header_h.spacing())
+
+        layout.addWidget(header)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        sep.setFrameShadow(QFrame.Sunken)
+        layout.addWidget(sep)
 
         self._rows_layout = QVBoxLayout()
         self._rows_layout.setContentsMargins(0, 0, 0, 0)
@@ -326,6 +396,10 @@ class ClassesSection(QWidget):
         btn_add = QPushButton("+ Add Class")
         btn_add.clicked.connect(self._add_class)
         layout.addWidget(btn_add)
+
+    def set_current_row(self, row: int) -> None:
+        self._current_row = row
+        self._update_counts()
 
     def _rebuild_classes(self) -> None:
         # Remove existing row widgets
@@ -339,10 +413,12 @@ class ClassesSection(QWidget):
 
         for name in self._class_names:
             r, g, b = self.dataset_model.get_class_color(name)
-            count = self._count_annotations(name)
-            row = _ClassRow(name, r, g, b, count, self)
+            per_image = self._count_image_annotations(name, self._current_row)
+            total = self._count_annotations(name)
+            row = _ClassRow(name, r, g, b, per_image, total, self)
             row.row_clicked.connect(self._on_row_clicked)
             row.delete_requested.connect(self._on_delete_requested)
+            row.color_changed.connect(self._on_color_changed)
             if name == self._selected_name:
                 row.set_selected(True)
             self._rows[name] = row
@@ -350,7 +426,17 @@ class ClassesSection(QWidget):
 
     def _update_counts(self) -> None:
         for name, row in self._rows.items():
-            row.update_count(self._count_annotations(name))
+            per_image = self._count_image_annotations(name, self._current_row)
+            total = self._count_annotations(name)
+            row.update_counts(per_image, total)
+
+    def _count_image_annotations(self, class_name: str, image_row: int) -> int:
+        if image_row < 0:
+            return 0
+        return sum(
+            1 for a in self.dataset_model.get_annotations(image_row)
+            if a["category_name"] == class_name
+        )
 
     def _count_annotations(self, class_name: str) -> int:
         total = 0
@@ -373,6 +459,9 @@ class ClassesSection(QWidget):
         if name in self._rows:
             self._rows[name].set_selected(True)
         self.class_selected.emit(name)
+
+    def _on_color_changed(self, name: str, r: int, g: int, b: int) -> None:
+        self.dataset_model.set_class_color(name, (r, g, b))
 
     def _on_delete_requested(self, name: str) -> None:
         self.dataset_model.delete_class(name)
@@ -455,3 +544,7 @@ class RightPanel(QWidget):
     def set_counter(self, current: int, total: int) -> None:
         """Update the image position counter in the navigator."""
         self.navigator.set_counter(current, total)
+
+    def set_current_row(self, row: int) -> None:
+        """Update per-image annotation counts in the classes section."""
+        self.classes.set_current_row(row)

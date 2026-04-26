@@ -142,6 +142,7 @@ class WIPWindow(QWidget):
         total = self.dataset_model.rowCount()
         self.right_panel.set_counter(row, total)
         self.right_panel.select_row(row)
+        self.right_panel.set_current_row(row)
 
     def _prev_image(self) -> None:
         if self._current_row > 0:
