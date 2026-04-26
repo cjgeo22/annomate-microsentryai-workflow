@@ -1,11 +1,6 @@
 """
 WIPWindow — experimental Photoshop-style layout tab.
 
-Phases:
-  Phase 1  Structural skeleton: three fixed zones + three workspace columns.
-  Phase 2  Center canvas with image navigation wired up.
-  Phase 3+ Right panel, tool palette, and status bar wired up incrementally.
-
 Rules (consistent with other views):
   V1  All file/folder dialogs live here, not in controllers.
   V2  State is never accessed directly; all data reads go through model query APIs.
@@ -20,12 +15,15 @@ import os
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSizePolicy,
-    QPushButton, QFileDialog, QSplitter,
+    QWidget, QVBoxLayout, QHBoxLayout, QSizePolicy,
+    QFileDialog, QSplitter,
 )
 
 from views.annomate.image_label import ImageLabel
 from views.wip.right_panel import RightPanel
+from views.wip.tool_palette import ToolPalette
+from views.wip.top_bar import TopBar
+from views.wip.status_bar import WIPStatusBar
 
 
 class WIPWindow(QWidget):
@@ -45,11 +43,32 @@ class WIPWindow(QWidget):
         self.dataset_model = dataset_model
         self.io_controller = io_controller
         self._current_row: int = -1
+        self._active_class: str = ""
+        self._active_tool: str = ""
         self._init_ui()
 
+        # Dataset changes
         self.dataset_model.modelReset.connect(self._on_model_reset)
+
+        # Canvas → navigation / annotation
         self.canvas.polygonFinished.connect(self._on_polygon_finished)
+        self.canvas.toolCanceled.connect(self._on_tool_canceled)
+
+        # Canvas → status bar (live feedback)
+        self.canvas.zoom_changed.connect(self.status_bar.set_zoom)
+        self.canvas.image_loaded.connect(self.status_bar.set_dimensions)
+
+        # Top bar navigation
+        self.top_bar.open_folder_requested.connect(self._open_folder)
+        self.top_bar.prev_requested.connect(self._prev_image)
+        self.top_bar.next_requested.connect(self._next_image)
+
+        # Right panel
         self.right_panel.image_selected.connect(self._load_row)
+        self.right_panel.class_selected.connect(self._set_active_class)
+
+        # Tool palette
+        self.tool_palette.tool_selected.connect(self._on_tool_selected)
 
     # ------------------------------------------------------------------ #
     # UI construction
@@ -60,64 +79,13 @@ class WIPWindow(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        self._top_bar = self._build_top_bar()
-        root.addWidget(self._top_bar)
+        self.top_bar = TopBar(self)
+        root.addWidget(self.top_bar)
 
-        self._workspace = self._build_workspace()
-        root.addWidget(self._workspace, stretch=1)
+        root.addWidget(self._build_workspace(), stretch=1)
 
-        self._status_bar = self._build_status_bar()
-        root.addWidget(self._status_bar)
-
-    def _build_top_bar(self) -> QWidget:
-        bar = QWidget()
-        bar.setFixedHeight(54)
-
-        layout = QVBoxLayout(bar)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-
-        # Strip A — menu labels (24 px)
-        strip_a = QWidget()
-        strip_a.setFixedHeight(24)
-        a_layout = QHBoxLayout(strip_a)
-        a_layout.setContentsMargins(4, 0, 4, 0)
-        a_layout.setSpacing(0)
-        for label in ("File", "Edit", "Image", "Layer", "Type", "Select", "View", "Window", "Help"):
-            lbl = QLabel(label)
-            lbl.setContentsMargins(8, 0, 8, 0)
-            a_layout.addWidget(lbl)
-        a_layout.addStretch()
-        layout.addWidget(strip_a)
-
-        # Strip B — navigation controls (30 px)
-        strip_b = QWidget()
-        strip_b.setFixedHeight(30)
-        b_layout = QHBoxLayout(strip_b)
-        b_layout.setContentsMargins(8, 2, 8, 2)
-        b_layout.setSpacing(6)
-
-        btn_open = QPushButton("Open Folder")
-        btn_open.clicked.connect(self._open_folder)
-        b_layout.addWidget(btn_open)
-
-        b_layout.addSpacing(12)
-
-        self._btn_prev = QPushButton("< Prev")
-        self._btn_prev.clicked.connect(self._prev_image)
-        b_layout.addWidget(self._btn_prev)
-
-        self._btn_next = QPushButton("Next >")
-        self._btn_next.clicked.connect(self._next_image)
-        b_layout.addWidget(self._btn_next)
-
-        self._lbl_image_name = QLabel("")
-        b_layout.addWidget(self._lbl_image_name)
-
-        b_layout.addStretch()
-        layout.addWidget(strip_b)
-
-        return bar
+        self.status_bar = WIPStatusBar(self)
+        root.addWidget(self.status_bar)
 
     def _build_workspace(self) -> QWidget:
         workspace = QWidget()
@@ -127,12 +95,9 @@ class WIPWindow(QWidget):
         h_layout.setContentsMargins(0, 0, 0, 0)
         h_layout.setSpacing(0)
 
-        # Left tool palette — 52 px fixed, placeholder until Phase 5
-        self._tool_palette = QWidget()
-        self._tool_palette.setFixedWidth(52)
-        h_layout.addWidget(self._tool_palette)
+        self.tool_palette = ToolPalette(self)
+        h_layout.addWidget(self.tool_palette)
 
-        # Splitter: canvas (fluid) | right panel (resizable)
         splitter = QSplitter(Qt.Horizontal)
         splitter.setHandleWidth(4)
         splitter.setChildrenCollapsible(False)
@@ -146,28 +111,9 @@ class WIPWindow(QWidget):
         splitter.addWidget(self.right_panel)
 
         splitter.setSizes([700, 280])
-
         h_layout.addWidget(splitter, stretch=1)
 
         return workspace
-
-    def _build_status_bar(self) -> QWidget:
-        bar = QWidget()
-        bar.setFixedHeight(24)
-
-        layout = QHBoxLayout(bar)
-        layout.setContentsMargins(8, 0, 8, 0)
-        layout.setSpacing(16)
-
-        self._lbl_status_left = QLabel("Zoom: 100%  |  — × — px  |  Tool: None")
-        layout.addWidget(self._lbl_status_left)
-
-        layout.addStretch()
-
-        self._lbl_status_right = QLabel("Ready")
-        layout.addWidget(self._lbl_status_right)
-
-        return bar
 
     # ------------------------------------------------------------------ #
     # Navigation slots
@@ -184,18 +130,19 @@ class WIPWindow(QWidget):
             self._load_row(0)
         else:
             self._current_row = -1
-            self._lbl_image_name.setText("")
+            self.top_bar.set_image_label("")
 
     def _load_row(self, row: int) -> None:
         bgr = self.io_controller.load_image_for_display(row)
         if bgr is None:
             return
         self.canvas.set_image(bgr)
+        self.status_bar.set_zoom(1.0)   # set_image resets zoom without emitting zoom_changed
         self._current_row = row
         self._refresh_overlays()
         total = self.dataset_model.rowCount()
         filename = self.dataset_model.get_image_filename(row)
-        self._lbl_image_name.setText(f"{row + 1} / {total}  —  {filename}")
+        self.top_bar.set_image_label(f"{row + 1} / {total}  —  {filename}")
         self.right_panel.select_row(row)
 
     def _prev_image(self) -> None:
@@ -207,19 +154,40 @@ class WIPWindow(QWidget):
             self._load_row(self._current_row + 1)
 
     # ------------------------------------------------------------------ #
-    # Annotation
+    # Tool slots
     # ------------------------------------------------------------------ #
+
+    def _on_tool_selected(self, tool_name: str) -> None:
+        self._active_tool = tool_name
+        self.canvas.set_tool("polygon" if tool_name == "polygon" else None)
+        self.status_bar.set_tool(tool_name)
+        self.top_bar.set_active_tool(tool_name)
+
+    def _on_tool_canceled(self) -> None:
+        self.tool_palette.deselect_all()
+        self._active_tool = ""
+        self.status_bar.set_tool("")
+        self.top_bar.set_active_tool("")
+
+    # ------------------------------------------------------------------ #
+    # Annotation slots
+    # ------------------------------------------------------------------ #
+
+    def _set_active_class(self, name: str) -> None:
+        self._active_class = name
 
     def _on_polygon_finished(self, pts: list) -> None:
         if self._current_row < 0 or not pts:
             return
         class_names = self.dataset_model.get_class_names()
-        active_class = class_names[0] if class_names else "defect"
-        self.dataset_model.add_annotation(self._current_row, active_class, pts)
+        if not class_names:
+            return
+        target = self._active_class if self._active_class in class_names else class_names[0]
+        self.dataset_model.add_annotation(self._current_row, target, pts)
         self._refresh_overlays()
 
     def _refresh_overlays(self) -> None:
-        """Rebuild canvas overlays from the current row's annotations. V4: QColor constructed here."""
+        """Rebuild canvas overlays from the current row's annotations. V4: QColor here."""
         annos = self.dataset_model.get_annotations(self._current_row)
         overlays = [
             (a["polygon"], QColor(*self.dataset_model.get_class_color(a["category_name"])))

@@ -1,0 +1,76 @@
+"""
+WIPStatusBar — bottom status strip for the WIP tab.
+
+Shows live zoom %, image dimensions, active tool, and a right-aligned
+task/ready indicator. No custom colors — system palette only.
+"""
+
+from PySide6.QtWidgets import (
+    QWidget, QFrame, QVBoxLayout, QHBoxLayout, QLabel, QSizePolicy,
+)
+
+
+class WIPStatusBar(QWidget):
+    """Fixed-height status bar with zoom, dimensions, tool, and task fields.
+
+    Public methods are the only write path — no direct label access from outside.
+    """
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setFixedHeight(26)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        sep.setFrameShadow(QFrame.Sunken)
+        root.addWidget(sep)
+
+        bar = QWidget()
+        bar.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        h = QHBoxLayout(bar)
+        h.setContentsMargins(8, 0, 8, 0)
+        h.setSpacing(0)
+
+        self._lbl_zoom = QLabel("Zoom: 100%")
+        h.addWidget(self._lbl_zoom)
+        h.addWidget(self._pipe())
+
+        self._lbl_dims = QLabel("— × — px")
+        h.addWidget(self._lbl_dims)
+        h.addWidget(self._pipe())
+
+        self._lbl_tool = QLabel("Tool: None")
+        h.addWidget(self._lbl_tool)
+
+        h.addStretch()
+
+        self._lbl_task = QLabel("Ready")
+        h.addWidget(self._lbl_task)
+
+        root.addWidget(bar)
+
+    @staticmethod
+    def _pipe() -> QLabel:
+        lbl = QLabel("  |  ")
+        lbl.setEnabled(False)
+        return lbl
+
+    # ------------------------------------------------------------------ #
+    # Public update API
+    # ------------------------------------------------------------------ #
+
+    def set_zoom(self, factor: float) -> None:
+        self._lbl_zoom.setText(f"Zoom: {factor * 100:.0f}%")
+
+    def set_dimensions(self, w: int, h: int) -> None:
+        self._lbl_dims.setText(f"{w} × {h} px")
+
+    def set_tool(self, name: str) -> None:
+        self._lbl_tool.setText(f"Tool: {name.capitalize() if name else 'None'}")
+
+    def set_task_status(self, msg: str) -> None:
+        self._lbl_task.setText(msg)
