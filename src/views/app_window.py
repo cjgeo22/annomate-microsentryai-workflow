@@ -124,10 +124,13 @@ class AppWindow(QMainWindow):
         add("Save Project",      "Ctrl+S",       self._save_project)
         add("Save Project As…",  "Ctrl+Shift+S", self._save_project_as)
         file_menu.addSeparator()
+        add("Open Image Folder…", "",            self._open_image_folder)
         add("Relocate Images…",  "",             self._relocate_images)
         file_menu.addSeparator()
         add("Export COCO JSON…", "",             self._export_coco)
         add("Import COCO JSON…", "",             self._import_coco)
+        file_menu.addSeparator()
+        add("Preferences…",      "",             self._open_preferences)
         file_menu.addSeparator()
         add("Exit",              "Ctrl+Q",       self.close)
 
@@ -214,6 +217,16 @@ class AppWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, "Save Project", f"Could not save:\n{exc}")
 
+    def _open_image_folder(self) -> None:
+        """Scan a folder for images and load them as the current dataset."""
+        directory = QFileDialog.getExistingDirectory(
+            self, "Open Image Folder", os.getcwd()
+        )
+        if not directory:
+            return
+        self.io_controller.load_folder(directory)
+        self.annomate_view.refresh_class_combo()
+
     def _relocate_images(self) -> None:
         """Point to a new image directory without clearing annotations."""
         new_dir = QFileDialog.getExistingDirectory(
@@ -234,6 +247,9 @@ class AppWindow(QMainWindow):
                 self, "Annotations After Relocation",
                 orphan_msg.replace("Continue?", "They will be dropped on the next save.")
             )
+
+    def _open_preferences(self) -> None:
+        QMessageBox.information(self, "Preferences", "Preferences coming soon.")
 
     # ================================================================== #
     # COCO export / import

@@ -61,7 +61,7 @@ class RightPanel(QWidget):
         annos_sec.body_layout().addWidget(self.annotations)
         cl.addWidget(annos_sec)
 
-        meta_sec = _CollapsibleSection("Inspector & Notes")
+        meta_sec = _CollapsibleSection("Inspector/Notes")
         self.metadata = MetadataSection(dataset_model)
         meta_sec.body_layout().addWidget(self.metadata)
         cl.addWidget(meta_sec)
