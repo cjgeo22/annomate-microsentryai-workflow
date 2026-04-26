@@ -6,6 +6,7 @@ from views.wip.sections import (
     DataNavigatorSection,
     ClassesSection,
     AnnotationsSection,
+    MetadataSection,
 )
 
 
@@ -60,6 +61,10 @@ class RightPanel(QWidget):
         annos_sec.body_layout().addWidget(self.annotations)
         cl.addWidget(annos_sec)
 
+        meta_sec = _CollapsibleSection("Inspector & Notes")
+        self.metadata = MetadataSection(dataset_model)
+        meta_sec.body_layout().addWidget(self.metadata)
+        cl.addWidget(meta_sec)
 
         cl.addStretch()
         scroll.setWidget(content)
@@ -74,6 +79,7 @@ class RightPanel(QWidget):
         self.navigator.set_counter(current, total)
 
     def set_current_row(self, row: int) -> None:
-        """Update per-image counts and the annotations list for the new image."""
+        """Update per-image counts, annotations list, and metadata for the new image."""
         self.classes.set_current_row(row)
         self.annotations.set_current_row(row)
+        self.metadata.set_current_row(row)
