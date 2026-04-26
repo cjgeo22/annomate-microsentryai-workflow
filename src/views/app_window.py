@@ -19,6 +19,7 @@ from PySide6.QtGui import QAction, QKeySequence
 from views.annomate.window import ImageAnnotator
 from views.microsentry.window import MicroSentryWindow
 from views.validation.window import ValidationWindow
+from views.wip.window import WIPWindow
 
 _APP_TITLE = "AnnoMate & MicroSentryAI"
 
@@ -68,6 +69,7 @@ class AppWindow(QMainWindow):
             dataset_model, inference_model, inference_controller, io_controller
         )
         self.validation_view = ValidationWindow(validation_model, validation_controller)
+        self.wip_view        = WIPWindow(dataset_model, io_controller)
 
         # Cross-tab row sync
         self.annomate_view.row_selection_changed.connect(self.sentry_view.select_row)
@@ -81,6 +83,7 @@ class AppWindow(QMainWindow):
         self.tabs.addTab(self.annomate_view,   "AnnoMate")
         self.tabs.addTab(self.sentry_view,     "MicroSentry AI")
         self.tabs.addTab(self.validation_view, "Validation")
+        self.tabs.addTab(self.wip_view,        "WIP")
 
         central = QWidget()
         layout = QVBoxLayout(central)
