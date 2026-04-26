@@ -104,6 +104,10 @@ class WIPWindow(QWidget):
         self.right_panel.class_selected.connect(self._set_active_class)
         self.right_panel.prev_requested.connect(self._prev_image)
         self.right_panel.next_requested.connect(self._next_image)
+        self.right_panel.annotation_selected.connect(self._on_annotation_selected)
+
+        # Keep canvas in sync when annotations change outside the canvas
+        self.dataset_model.dataChanged.connect(self._on_dataset_data_changed)
 
         # Tool palette
         self.tool_palette.tool_selected.connect(self._on_tool_selected)
@@ -240,6 +244,14 @@ class WIPWindow(QWidget):
         self.dataset_model.add_annotation(self._current_row, target, pts)
         self._refresh_overlays()
 
+    def _on_dataset_data_changed(self, *_) -> None:
+        if self._current_row >= 0:
+            self._refresh_overlays()
+
+    def _on_annotation_selected(self, idx: int) -> None:
+        self.canvas.selected_polygon_idx = idx
+        self.canvas.update()
+
     def _refresh_overlays(self) -> None:
         """Rebuild canvas overlays from the current row's annotations. V4: QColor here."""
         annos = self.dataset_model.get_annotations(self._current_row)
@@ -247,4 +259,5 @@ class WIPWindow(QWidget):
             (a["polygon"], QColor(*self.dataset_model.get_class_color(a["category_name"])))
             for a in annos
         ]
+        self.canvas.selected_polygon_idx = -1
         self.canvas.set_overlays(overlays)

@@ -19,10 +19,11 @@ class RightPanel(QWidget):
         next_requested (): Forwarded from DataNavigatorSection.
     """
 
-    image_selected = Signal(int)
-    class_selected = Signal(str)
-    prev_requested = Signal()
-    next_requested = Signal()
+    image_selected      = Signal(int)
+    class_selected      = Signal(str)
+    prev_requested      = Signal()
+    next_requested      = Signal()
+    annotation_selected = Signal(int)
 
     def __init__(self, dataset_model, parent: QWidget = None) -> None:
         super().__init__(parent)
@@ -55,6 +56,7 @@ class RightPanel(QWidget):
 
         annos_sec = _CollapsibleSection("Current Image Annotations")
         self.annotations = AnnotationsSection(dataset_model)
+        self.annotations.annotation_selected.connect(self.annotation_selected)
         annos_sec.body_layout().addWidget(self.annotations)
         cl.addWidget(annos_sec)
 
