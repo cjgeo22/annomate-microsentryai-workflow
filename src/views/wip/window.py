@@ -12,11 +12,11 @@ Color scheme: no explicit stylesheet colors — Qt platform palette only.
 
 import os
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor
+from PySide6.QtCore import Qt, QEvent
+from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QSizePolicy,
-    QFileDialog, QSplitter,
+    QWidget, QFrame, QVBoxLayout, QHBoxLayout, QSizePolicy,
+    QFileDialog, QSplitter, QToolButton,
 )
 
 from views.annomate.image_label import ImageLabel
@@ -24,6 +24,44 @@ from views.wip.right_panel import RightPanel
 from views.wip.tool_palette import ToolPalette
 from views.wip.top_bar import TopBar
 from views.wip.status_bar import WIPStatusBar
+
+
+class _ZoomToolbar(QFrame):
+    """Floating vertical toolbar with zoom-in, zoom-out, and reset-view buttons."""
+
+    _MARGIN = 10
+    _BTN_SIZE = 30
+
+    def __init__(self, canvas, parent: QWidget = None) -> None:
+        super().__init__(parent)
+        self.setFrameStyle(QFrame.StyledPanel | QFrame.Raised)
+
+        font = QFont()
+        font.setPointSize(14)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(2)
+
+        for text, tip, slot in (
+            ("+",  "Zoom In",    canvas.zoom_in),
+            ("−",  "Zoom Out",   canvas.zoom_out),
+            ("⊙",  "Reset View", canvas.reset_view),
+        ):
+            btn = QToolButton()
+            btn.setText(text)
+            btn.setToolTip(tip)
+            btn.setFixedSize(self._BTN_SIZE, self._BTN_SIZE)
+            btn.setFont(font)
+            btn.clicked.connect(slot)
+            layout.addWidget(btn)
+
+        self.adjustSize()
+
+    def reposition(self, canvas_size) -> None:
+        x = self._MARGIN
+        y = canvas_size.height() - self.height() - self._MARGIN
+        self.move(x, y)
 
 
 class WIPWindow(QWidget):
@@ -106,6 +144,10 @@ class WIPWindow(QWidget):
         self.canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         splitter.addWidget(self.canvas)
 
+        self._zoom_toolbar = _ZoomToolbar(self.canvas, self.canvas)
+        self._zoom_toolbar.raise_()
+        self.canvas.installEventFilter(self)
+
         self.right_panel = RightPanel(self.dataset_model, self)
         self.right_panel.setMinimumWidth(160)
         splitter.addWidget(self.right_panel)
@@ -114,6 +156,19 @@ class WIPWindow(QWidget):
         h_layout.addWidget(splitter, stretch=1)
 
         return workspace
+
+    # ------------------------------------------------------------------ #
+    # Zoom toolbar positioning
+    # ------------------------------------------------------------------ #
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._zoom_toolbar.reposition(self.canvas.size())
+
+    def eventFilter(self, obj, event) -> bool:
+        if obj is self.canvas and event.type() == QEvent.Resize:
+            self._zoom_toolbar.reposition(event.size())
+        return super().eventFilter(obj, event)
 
     # ------------------------------------------------------------------ #
     # Navigation slots
