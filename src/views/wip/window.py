@@ -16,13 +16,12 @@ from PySide6.QtCore import Qt, QEvent
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
     QWidget, QFrame, QVBoxLayout, QHBoxLayout, QSizePolicy,
-    QFileDialog, QSplitter, QToolButton,
+    QSplitter, QToolButton,
 )
 
 from views.annomate.image_label import ImageLabel
 from views.wip.right_panel import RightPanel
 from views.wip.tool_palette import ToolPalette
-from views.wip.top_bar import TopBar
 from views.wip.status_bar import WIPStatusBar
 
 
@@ -96,9 +95,6 @@ class WIPWindow(QWidget):
         self.canvas.zoom_changed.connect(self.status_bar.set_zoom)
         self.canvas.image_loaded.connect(self.status_bar.set_dimensions)
 
-        # Top bar
-        self.top_bar.open_folder_requested.connect(self._open_folder)
-
         # Right panel
         self.right_panel.image_selected.connect(self._load_row)
         self.right_panel.class_selected.connect(self._set_active_class)
@@ -120,9 +116,6 @@ class WIPWindow(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
-
-        self.top_bar = TopBar(self)
-        root.addWidget(self.top_bar)
 
         root.addWidget(self._build_workspace(), stretch=1)
 
@@ -178,12 +171,6 @@ class WIPWindow(QWidget):
     # Navigation slots
     # ------------------------------------------------------------------ #
 
-    def _open_folder(self) -> None:
-        directory = QFileDialog.getExistingDirectory(self, "Open Image Folder", os.getcwd())
-        if not directory:
-            return
-        self.io_controller.load_folder(directory)
-
     def _on_model_reset(self) -> None:
         if self.dataset_model.rowCount() > 0:
             self._load_row(0)
@@ -219,13 +206,11 @@ class WIPWindow(QWidget):
         self._active_tool = tool_name
         self.canvas.set_tool("polygon" if tool_name == "polygon" else None)
         self.status_bar.set_tool(tool_name)
-        self.top_bar.set_active_tool(tool_name)
 
     def _on_tool_canceled(self) -> None:
         self.tool_palette.deselect_all()
         self._active_tool = ""
         self.status_bar.set_tool("")
-        self.top_bar.set_active_tool("")
 
     # ------------------------------------------------------------------ #
     # Annotation slots
