@@ -21,10 +21,11 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSizePolicy,
-    QPushButton, QFileDialog,
+    QPushButton, QFileDialog, QSplitter,
 )
 
 from views.annomate.image_label import ImageLabel
+from views.wip.right_panel import RightPanel
 
 
 class WIPWindow(QWidget):
@@ -48,6 +49,7 @@ class WIPWindow(QWidget):
 
         self.dataset_model.modelReset.connect(self._on_model_reset)
         self.canvas.polygonFinished.connect(self._on_polygon_finished)
+        self.right_panel.image_selected.connect(self._load_row)
 
     # ------------------------------------------------------------------ #
     # UI construction
@@ -130,15 +132,22 @@ class WIPWindow(QWidget):
         self._tool_palette.setFixedWidth(52)
         h_layout.addWidget(self._tool_palette)
 
-        # Center artboard — fluid, real ImageLabel
+        # Splitter: canvas (fluid) | right panel (resizable)
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.setHandleWidth(4)
+        splitter.setChildrenCollapsible(False)
+
         self.canvas = ImageLabel(self)
         self.canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        h_layout.addWidget(self.canvas, stretch=1)
+        splitter.addWidget(self.canvas)
 
-        # Right panel — 280 px fixed, placeholder until Phase 3
-        self._right_panel = QWidget()
-        self._right_panel.setFixedWidth(280)
-        h_layout.addWidget(self._right_panel)
+        self.right_panel = RightPanel(self.dataset_model, self)
+        self.right_panel.setMinimumWidth(160)
+        splitter.addWidget(self.right_panel)
+
+        splitter.setSizes([700, 280])
+
+        h_layout.addWidget(splitter, stretch=1)
 
         return workspace
 
@@ -187,6 +196,7 @@ class WIPWindow(QWidget):
         total = self.dataset_model.rowCount()
         filename = self.dataset_model.get_image_filename(row)
         self._lbl_image_name.setText(f"{row + 1} / {total}  —  {filename}")
+        self.right_panel.select_row(row)
 
     def _prev_image(self) -> None:
         if self._current_row > 0:
