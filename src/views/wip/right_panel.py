@@ -16,7 +16,7 @@ from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import (
     QWidget, QFrame, QVBoxLayout, QHBoxLayout, QLabel,
     QListWidget, QListWidgetItem,
-    QPushButton, QScrollArea, QSizePolicy,
+    QPushButton, QScrollArea, QSizePolicy, QToolButton,
     QMenu, QInputDialog, QMessageBox, QColorDialog,
 )
 
@@ -95,6 +95,8 @@ class DataNavigatorSection(QWidget):
     """
 
     image_selected = Signal(int)
+    prev_requested = Signal()
+    next_requested = Signal()
 
     def __init__(self, dataset_model, parent: QWidget = None) -> None:
         super().__init__(parent)
@@ -109,7 +111,33 @@ class DataNavigatorSection(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
 
-        layout.addWidget(self._build_legend())
+        # Nav row: Prev · Next · counter
+        nav_row = QWidget()
+        nav_h = QHBoxLayout(nav_row)
+        nav_h.setContentsMargins(0, 0, 0, 0)
+        nav_h.setSpacing(4)
+
+        btn_prev = QToolButton()
+        btn_prev.setText("‹")
+        btn_prev.setToolTip("Previous image")
+        btn_prev.clicked.connect(self.prev_requested)
+        nav_h.addWidget(btn_prev)
+
+        btn_next = QToolButton()
+        btn_next.setText("›")
+        btn_next.setToolTip("Next image")
+        btn_next.clicked.connect(self.next_requested)
+        nav_h.addWidget(btn_next)
+
+        self._lbl_counter = QLabel("No images loaded")
+        self._lbl_counter.setStyleSheet("color: black;")
+        nav_h.addWidget(self._lbl_counter)
+        nav_h.addStretch()
+
+        layout.addWidget(nav_row)
+
+        self._legend = self._build_legend()
+        layout.addWidget(self._legend)
 
         self.list_widget = QListWidget()
         self.list_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -117,6 +145,10 @@ class DataNavigatorSection(QWidget):
         self.list_widget.setMaximumHeight(320)
         self.list_widget.currentRowChanged.connect(self._on_row_changed)
         layout.addWidget(self.list_widget)
+
+        # Start hidden — shown once images are loaded
+        self._legend.setVisible(False)
+        self.list_widget.setVisible(False)
 
     def _build_legend(self) -> QWidget:
         widget = QWidget()
@@ -135,7 +167,19 @@ class DataNavigatorSection(QWidget):
         self.list_widget.clear()
         self._dot_labels.clear()
 
-        for row in range(self.dataset_model.rowCount()):
+        total = self.dataset_model.rowCount()
+        has_images = total > 0
+        self._legend.setVisible(has_images)
+        self.list_widget.setVisible(has_images)
+
+        if not has_images:
+            self._lbl_counter.setText("No images loaded")
+            self.list_widget.blockSignals(False)
+            return
+
+        self._lbl_counter.setText(f"{total} image{'s' if total != 1 else ''} loaded")
+
+        for row in range(total):
             item = QListWidgetItem()
             item.setSizeHint(QSize(0, 24))
             self.list_widget.addItem(item)
@@ -172,6 +216,11 @@ class DataNavigatorSection(QWidget):
         self.list_widget.blockSignals(True)
         self.list_widget.setCurrentRow(row)
         self.list_widget.blockSignals(False)
+
+    def set_counter(self, current: int, total: int) -> None:
+        """Update the position counter label (e.g. '5 / 24')."""
+        if total > 0:
+            self._lbl_counter.setText(f"{current + 1} / {total}")
 
 
 # ======================================================================= #
@@ -363,6 +412,8 @@ class RightPanel(QWidget):
 
     image_selected = Signal(int)
     class_selected = Signal(str)
+    prev_requested = Signal()
+    next_requested = Signal()
 
     def __init__(self, dataset_model, parent: QWidget = None) -> None:
         super().__init__(parent)
@@ -388,6 +439,8 @@ class RightPanel(QWidget):
         nav_sec = _CollapsibleSection("Dataset Navigator")
         self.navigator = DataNavigatorSection(dataset_model)
         self.navigator.image_selected.connect(self.image_selected)
+        self.navigator.prev_requested.connect(self.prev_requested)
+        self.navigator.next_requested.connect(self.next_requested)
         nav_sec.body_layout().addWidget(self.navigator)
         cl.addWidget(nav_sec)
 
@@ -398,3 +451,7 @@ class RightPanel(QWidget):
     def select_row(self, row: int) -> None:
         """Silently highlight *row* in the navigator list."""
         self.navigator.select_row(row)
+
+    def set_counter(self, current: int, total: int) -> None:
+        """Update the image position counter in the navigator."""
+        self.navigator.set_counter(current, total)

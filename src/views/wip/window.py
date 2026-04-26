@@ -58,14 +58,14 @@ class WIPWindow(QWidget):
         self.canvas.zoom_changed.connect(self.status_bar.set_zoom)
         self.canvas.image_loaded.connect(self.status_bar.set_dimensions)
 
-        # Top bar navigation
+        # Top bar
         self.top_bar.open_folder_requested.connect(self._open_folder)
-        self.top_bar.prev_requested.connect(self._prev_image)
-        self.top_bar.next_requested.connect(self._next_image)
 
         # Right panel
         self.right_panel.image_selected.connect(self._load_row)
         self.right_panel.class_selected.connect(self._set_active_class)
+        self.right_panel.prev_requested.connect(self._prev_image)
+        self.right_panel.next_requested.connect(self._next_image)
 
         # Tool palette
         self.tool_palette.tool_selected.connect(self._on_tool_selected)
@@ -130,7 +130,6 @@ class WIPWindow(QWidget):
             self._load_row(0)
         else:
             self._current_row = -1
-            self.top_bar.set_image_label("")
 
     def _load_row(self, row: int) -> None:
         bgr = self.io_controller.load_image_for_display(row)
@@ -141,8 +140,7 @@ class WIPWindow(QWidget):
         self._current_row = row
         self._refresh_overlays()
         total = self.dataset_model.rowCount()
-        filename = self.dataset_model.get_image_filename(row)
-        self.top_bar.set_image_label(f"{row + 1} / {total}  —  {filename}")
+        self.right_panel.set_counter(row, total)
         self.right_panel.select_row(row)
 
     def _prev_image(self) -> None:
