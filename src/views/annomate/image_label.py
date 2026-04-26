@@ -63,6 +63,8 @@ class ImageLabel(QLabel):
     polygonEdited   = Signal(int, list)   # (polygon_idx, pts in original coords)
     polygonSelected = Signal(int)         # polygon index (-1 for deselect)
     toolCanceled    = Signal()            # Escape pressed while polygon tool active
+    zoom_changed    = Signal(float)       # emitted whenever _zoom changes
+    image_loaded    = Signal(int, int)    # (orig_w, orig_h) emitted when a new image is set
 
     def __init__(self, parent: object = None) -> None:
         """Initialize ImageLabel with default zoom, pan, and annotation state.
@@ -144,6 +146,7 @@ class ImageLabel(QLabel):
             QImage.Format_RGB888
         )
         self._display_qpix = QPixmap.fromImage(qimg)
+        self.image_loaded.emit(w, h)
 
         # --- Reset all tracking states on new image ---
         self.clear_current_polygon()
@@ -502,6 +505,7 @@ class ImageLabel(QLabel):
 
         old_zoom = self._zoom
         self._zoom = max(0.2, min(8.0, old_zoom * factor))
+        self.zoom_changed.emit(self._zoom)
 
         self._pan = QPointF(
             cursor_pos.x() - point_in_disp.x() * self._zoom,
@@ -521,6 +525,7 @@ class ImageLabel(QLabel):
         """Reset zoom to ``1.0`` and pan to the origin, then repaint."""
         self._zoom = 1.0
         self._pan = QPointF(0, 0)
+        self.zoom_changed.emit(self._zoom)
         self.update()
 
     def _apply_zoom(self, factor: float) -> None:
@@ -540,6 +545,7 @@ class ImageLabel(QLabel):
         point_in_disp = self.view_to_display(center)
 
         self._zoom = max(0.2, min(8.0, self._zoom * factor))
+        self.zoom_changed.emit(self._zoom)
 
         self._pan = QPointF(
             center.x() - point_in_disp.x() * self._zoom,

@@ -391,6 +391,33 @@ class DatasetTableModel(QAbstractTableModel):
             return ""
         return self.state.notes.get(self.state.image_files[row], "")
 
+    def is_reviewed(self, row: int) -> bool:
+        """Return whether the image at *row* has been reviewed.
+
+        Args:
+            row (int): Zero-based row index of the target image.
+
+        Returns:
+            bool: ``True`` if the image has annotations, an inspector, or a
+                note; ``False`` for out-of-bounds rows or unreviewed images.
+        """
+        if not (0 <= row < self.rowCount()):
+            return False
+        return self.state.is_reviewed(self.state.image_files[row])
+
+    def get_image_filename(self, row: int) -> str:
+        """Return the raw filename (basename) for the image at *row*.
+
+        Args:
+            row (int): Zero-based row index of the target image.
+
+        Returns:
+            str: Filename string, or an empty string for out-of-bounds rows.
+        """
+        if not (0 <= row < self.rowCount()):
+            return ""
+        return self.state.image_files[row]
+
     # ------------------------------------------------------------------ #
     # Internal helpers
     # ------------------------------------------------------------------ #
