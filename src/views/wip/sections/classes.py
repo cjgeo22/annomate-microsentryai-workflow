@@ -2,7 +2,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import (
     QWidget, QFrame, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QToolButton, QInputDialog, QMessageBox, QColorDialog,
+    QPushButton, QLineEdit, QToolButton, QColorDialog,
 )
 
 
@@ -163,9 +163,21 @@ class ClassesSection(QWidget):
         self._rows_layout.setSpacing(1)
         layout.addLayout(self._rows_layout)
 
-        btn_add = QPushButton("+ Add Class")
+        add_row = QWidget()
+        add_h = QHBoxLayout(add_row)
+        add_h.setContentsMargins(4, 4, 4, 4)
+        add_h.setSpacing(4)
+
+        self._name_input = QLineEdit()
+        self._name_input.setPlaceholderText("Enter new class name")
+        self._name_input.returnPressed.connect(self._add_class)
+        add_h.addWidget(self._name_input, stretch=1)
+
+        btn_add = QPushButton("Add Class")
         btn_add.clicked.connect(self._add_class)
-        layout.addWidget(btn_add)
+        add_h.addWidget(btn_add)
+
+        layout.addWidget(add_row)
 
     def set_current_row(self, row: int) -> None:
         self._current_row = row
@@ -238,17 +250,19 @@ class ClassesSection(QWidget):
             self._selected_name = ""
         self._rebuild_classes()
 
+    def _pick_next_unique_color(self) -> tuple:
+        from core.utils.constants import DEFAULT_CLASS_COLORS
+        used = set(map(tuple, self.dataset_model.get_used_class_colors()))
+        for cand in DEFAULT_CLASS_COLORS:
+            if cand not in used:
+                return cand
+        return DEFAULT_CLASS_COLORS[0]
+
     def _add_class(self) -> None:
-        name, ok = QInputDialog.getText(self, "Add Class", "Class name:")
-        if not ok or not name.strip():
+        name = self._name_input.text().strip()
+        if not name or name in self.dataset_model.get_class_names():
             return
-        name = name.strip()
-        if name in self.dataset_model.get_class_names():
-            QMessageBox.warning(self, "Add Class", f'"{name}" already exists.')
-            return
-        color = QColorDialog.getColor(QColor(Qt.white), self, "Choose Class Color")
-        if not color.isValid():
-            return
-        self.dataset_model.add_class(name, (color.red(), color.green(), color.blue()))
+        self.dataset_model.add_class(name, self._pick_next_unique_color())
+        self._name_input.clear()
         self._rebuild_classes()
         self._on_row_clicked(name)
