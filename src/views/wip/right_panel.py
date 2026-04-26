@@ -39,6 +39,14 @@ class RightPanel(QWidget):
         cl.setContentsMargins(0, 0, 0, 0)
         cl.setSpacing(0)
 
+        nav_sec = _CollapsibleSection("Dataset Navigator")
+        self.navigator = DataNavigatorSection(dataset_model)
+        self.navigator.image_selected.connect(self.image_selected)
+        self.navigator.prev_requested.connect(self.prev_requested)
+        self.navigator.next_requested.connect(self.next_requested)
+        nav_sec.body_layout().addWidget(self.navigator)
+        cl.addWidget(nav_sec)
+        
         classes_sec = _CollapsibleSection("Annotation Classes")
         self.classes = ClassesSection(dataset_model)
         self.classes.class_selected.connect(self.class_selected)
@@ -50,13 +58,6 @@ class RightPanel(QWidget):
         annos_sec.body_layout().addWidget(self.annotations)
         cl.addWidget(annos_sec)
 
-        nav_sec = _CollapsibleSection("Dataset Navigator")
-        self.navigator = DataNavigatorSection(dataset_model)
-        self.navigator.image_selected.connect(self.image_selected)
-        self.navigator.prev_requested.connect(self.prev_requested)
-        self.navigator.next_requested.connect(self.next_requested)
-        nav_sec.body_layout().addWidget(self.navigator)
-        cl.addWidget(nav_sec)
 
         cl.addStretch()
         scroll.setWidget(content)
