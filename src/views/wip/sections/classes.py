@@ -23,8 +23,22 @@ class _ClassRow(QWidget):
     delete_requested = Signal(str)
     color_changed    = Signal(str, int, int, int)
 
-    _COUNT_W = 40
-    _SWATCH_W = 33
+    # ── Column-width constants ────────────────────────────────────────────────
+    # Layout order:  [color col] [class name …stretch…] [image] [total] [trash]
+    #
+    # _COLOR_COL_W  — fixed pixel width of the entire color column.
+    #                 The swatch sits centered inside it, so changing _SWATCH_W
+    #                 never causes the name column to shift. Header label uses
+    #                 the same value so header and rows stay aligned.
+    # _SWATCH_W     — clickable color swatch size (must be ≤ _COLOR_COL_W).
+    # _COUNT_W      — fixed width for "Image" and "Total" count labels.
+    # _NAME_MIN_W   — minimum width of the class-name text column (stretch=1
+    #                 means it expands to fill remaining space beyond this floor).
+    # ─────────────────────────────────────────────────────────────────────────
+    _COLOR_COL_W = 44
+    _SWATCH_W    = 24
+    _COUNT_W     = 40
+    _NAME_MIN_W  = 60
 
     def __init__(self, name: str, r: int, g: int, b: int,
                  per_image_count: int, total_count: int,
@@ -39,6 +53,10 @@ class _ClassRow(QWidget):
         layout.setContentsMargins(6, 3, 6, 3)
         layout.setSpacing(8)
 
+        swatch_col = QWidget()
+        swatch_col.setFixedWidth(self._COLOR_COL_W)
+        swatch_h = QHBoxLayout(swatch_col)
+        swatch_h.setContentsMargins(0, 0, 0, 0)
         self._swatch = QToolButton()
         self._swatch.setFixedSize(self._SWATCH_W, self._SWATCH_W)
         self._swatch.setToolTip("Change color")
@@ -46,9 +64,12 @@ class _ClassRow(QWidget):
             f"background-color: rgb({r},{g},{b}); border: 1px solid gray; border-radius: 3px;"
         )
         self._swatch.clicked.connect(self._on_swatch_clicked)
-        layout.addWidget(self._swatch)
+        swatch_h.addWidget(self._swatch, alignment=Qt.AlignCenter)
+        layout.addWidget(swatch_col)
 
-        layout.addWidget(QLabel(name), stretch=1)
+        name_lbl = QLabel(name)
+        name_lbl.setMinimumWidth(self._NAME_MIN_W)
+        layout.addWidget(name_lbl, stretch=1)
 
         self._image_lbl = QLabel(str(per_image_count))
         self._image_lbl.setFixedWidth(self._COUNT_W)
@@ -129,13 +150,15 @@ class ClassesSection(QWidget):
         header_h.setSpacing(6)
 
         lbl_color = QLabel("Color")
-        lbl_color.setFixedWidth(_ClassRow._SWATCH_W)
+        lbl_color.setFixedWidth(_ClassRow._COLOR_COL_W)
+        lbl_color.setAlignment(Qt.AlignCenter)
         lbl_color.setStyleSheet("font-size: 12px; font-weight: bold;")
         header_h.addWidget(lbl_color)
 
         lbl_class = QLabel("Class")
+        lbl_class.setMinimumWidth(_ClassRow._NAME_MIN_W)
         lbl_class.setStyleSheet("font-size: 12px; font-weight: bold;")
-        header_h.addWidget(lbl_class, stretch=0)
+        header_h.addWidget(lbl_class, stretch=1)
 
         lbl_image = QLabel("Image")
         lbl_image.setFixedWidth(_ClassRow._COUNT_W)

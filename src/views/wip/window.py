@@ -233,6 +233,8 @@ class WIPWindow(QWidget):
 
     def _set_active_class(self, name: str) -> None:
         self._active_class = name
+        r, g, b = self.dataset_model.get_class_color(name)
+        self.canvas.set_active_color(QColor(r, g, b))
 
     def _on_polygon_finished(self, pts: list) -> None:
         if self._current_row < 0 or not pts:

@@ -4,9 +4,24 @@ from PySide6.QtWidgets import (
     QWidget, QFrame, QVBoxLayout, QHBoxLayout, QLabel, QToolButton,
 )
 
-_DOT_W   = 22
-_COUNT_W = 52
-_TRASH_W = 28
+# ── Column-width constants ────────────────────────────────────────────────────
+# Layout order:  [color col] [class name …stretch…] [vertices] [trash]
+#
+# _COLOR_COL_W  — fixed pixel width of the entire color column.
+#                 The dot sits centered inside it, so changing _DOT_W never
+#                 causes the name column to shift. Header label uses the same
+#                 value so header and rows stay perfectly aligned.
+# _DOT_W        — diameter of the circular color indicator (must be ≤ _COLOR_COL_W).
+# _COUNT_W      — fixed width for the "Vertices" count label.
+# _TRASH_W      — fixed size of the trash button.
+# _NAME_MIN_W   — minimum width of the class-name text column (stretch=1
+#                 means it expands to fill remaining space beyond this floor).
+# ─────────────────────────────────────────────────────────────────────────────
+_COLOR_COL_W = 44
+_DOT_W       = 16
+_COUNT_W     = 52
+_TRASH_W     = 28
+_NAME_MIN_W  = 60
 
 
 class _AnnotationRow(QWidget):
@@ -30,14 +45,21 @@ class _AnnotationRow(QWidget):
         h.setContentsMargins(6, 3, 6, 3)
         h.setSpacing(8)
 
+        dot_col = QWidget()
+        dot_col.setFixedWidth(_COLOR_COL_W)
+        dot_h = QHBoxLayout(dot_col)
+        dot_h.setContentsMargins(0, 0, 0, 0)
         dot = QLabel()
         dot.setFixedSize(_DOT_W, _DOT_W)
         dot.setStyleSheet(
             f"background-color: rgb({r},{g},{b}); border-radius: {_DOT_W // 2}px;"
         )
-        h.addWidget(dot)
+        dot_h.addWidget(dot, alignment=Qt.AlignCenter)
+        h.addWidget(dot_col)
 
-        h.addWidget(QLabel(name), stretch=1)
+        name_lbl = QLabel(name)
+        name_lbl.setMinimumWidth(_NAME_MIN_W)
+        h.addWidget(name_lbl, stretch=1)
 
         lbl_v = QLabel(str(verts))
         lbl_v.setFixedWidth(_COUNT_W)
@@ -100,11 +122,13 @@ class AnnotationsSection(QWidget):
         header_h.setSpacing(8)
 
         lbl_color = QLabel("Color")
-        lbl_color.setFixedWidth(_DOT_W)
+        lbl_color.setFixedWidth(_COLOR_COL_W)
+        lbl_color.setAlignment(Qt.AlignCenter)
         lbl_color.setStyleSheet("font-size: 12px; font-weight: bold;")
         header_h.addWidget(lbl_color)
 
         lbl_class = QLabel("Class")
+        lbl_class.setMinimumWidth(_NAME_MIN_W)
         lbl_class.setStyleSheet("font-size: 12px; font-weight: bold;")
         header_h.addWidget(lbl_class, stretch=1)
 
