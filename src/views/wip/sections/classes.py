@@ -115,6 +115,7 @@ class ClassesSection(QWidget):
         self._selected_name: str = ""
         self._current_row: int = -1
         self._init_ui()
+        self.dataset_model.modelReset.connect(self._rebuild_classes)
         self.dataset_model.dataChanged.connect(self._on_data_changed)
 
     def _init_ui(self) -> None:
