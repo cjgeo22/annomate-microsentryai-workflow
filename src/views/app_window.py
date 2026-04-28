@@ -69,7 +69,7 @@ class AppWindow(QMainWindow):
             dataset_model, inference_model, inference_controller, io_controller
         )
         self.validation_view = ValidationWindow(validation_model, validation_controller)
-        self.wip_view        = WIPWindow(dataset_model, io_controller)
+        self.wip_view        = WIPWindow(dataset_model, io_controller, inference_model, inference_controller)
 
         # Cross-tab row sync
         self.annomate_view.row_selection_changed.connect(self.sentry_view.select_row)
@@ -110,29 +110,31 @@ class AppWindow(QMainWindow):
     # ================================================================== #
 
     def _build_menu(self) -> None:
-        file_menu = self.menuBar().addMenu("&File")
-
-        def add(label, shortcut, slot):
+        def add(menu, label, shortcut, slot):
             act = QAction(label, self)
             if shortcut:
                 act.setShortcut(QKeySequence(shortcut))
             act.triggered.connect(slot)
-            file_menu.addAction(act)
+            menu.addAction(act)
 
-        add("New Project",       "Ctrl+N",       self._new_project)
-        add("Open Project…",     "Ctrl+O",       self._open_project)
-        add("Save Project",      "Ctrl+S",       self._save_project)
-        add("Save Project As…",  "Ctrl+Shift+S", self._save_project_as)
+        file_menu = self.menuBar().addMenu("&File")
+        add(file_menu, "New Project",        "Ctrl+N",       self._new_project)
+        add(file_menu, "Open Project…",      "Ctrl+O",       self._open_project)
+        add(file_menu, "Save Project",       "Ctrl+S",       self._save_project)
+        add(file_menu, "Save Project As…",   "Ctrl+Shift+S", self._save_project_as)
         file_menu.addSeparator()
-        add("Open Image Folder…", "",            self._open_image_folder)
-        add("Relocate Images…",  "",             self._relocate_images)
+        add(file_menu, "Open Image Folder…", "",             self._open_image_folder)
+        add(file_menu, "Relocate Images…",   "",             self._relocate_images)
         file_menu.addSeparator()
-        add("Export COCO JSON…", "",             self._export_coco)
-        add("Import COCO JSON…", "",             self._import_coco)
+        add(file_menu, "Preferences…",       "",             self._open_preferences)
         file_menu.addSeparator()
-        add("Preferences…",      "",             self._open_preferences)
-        file_menu.addSeparator()
-        add("Exit",              "Ctrl+Q",       self.close)
+        add(file_menu, "Exit",               "Ctrl+Q",       self.close)
+
+        data_menu = self.menuBar().addMenu("&Data")
+        add(data_menu, "Import JSON Data…",      "", self._import_coco)
+        data_menu.addSeparator()
+        add(data_menu, "Export Polygons + Data…", "", self._export_polygons)
+        add(data_menu, "Export CSV…",             "", self._export_csv)
 
     # ================================================================== #
     # Project slots
@@ -252,36 +254,45 @@ class AppWindow(QMainWindow):
         QMessageBox.information(self, "Preferences", "Preferences coming soon.")
 
     # ================================================================== #
-    # COCO export / import
+    # Data menu handlers
     # ================================================================== #
-
-    def _export_coco(self) -> None:
-        from pathlib import Path
-        image_dir = self.dataset_model.get_image_dir()
-        default = f"{Path(image_dir).name}_coco.json" if image_dir else "annotations.coco.json"
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Export COCO JSON", default, "JSON (*.json)"
-        )
-        if not path:
-            return
-        try:
-            self.project_controller.export_coco(path)
-            QMessageBox.information(self, "Export COCO", f"Saved to:\n{path}")
-        except Exception as exc:
-            QMessageBox.critical(self, "Export COCO", f"Export failed:\n{exc}")
 
     def _import_coco(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "Import COCO JSON", "", "JSON (*.json)"
+            self, "Import JSON Data", "", "JSON (*.json)"
         )
         if not path:
             return
         try:
             self.io_controller.import_data_json(path)
         except Exception as exc:
-            QMessageBox.critical(self, "Import COCO", f"Import failed:\n{exc}")
+            QMessageBox.critical(self, "Import JSON Data", f"Import failed:\n{exc}")
             return
         self.annomate_view.refresh_class_combo()
+
+    def _export_polygons(self) -> None:
+        out_dir = QFileDialog.getExistingDirectory(
+            self, "Choose output folder", os.getcwd()
+        )
+        if not out_dir:
+            return
+        try:
+            msg = self.io_controller.export_polygons_and_data(out_dir)
+            QMessageBox.information(self, "Export", msg)
+        except Exception as exc:
+            QMessageBox.critical(self, "Export Error", str(exc))
+
+    def _export_csv(self) -> None:
+        out_path, _ = QFileDialog.getSaveFileName(
+            self, "Save CSV", "metadata.csv", "CSV (*.csv)"
+        )
+        if not out_path:
+            return
+        try:
+            msg = self.io_controller.export_csv(out_path)
+            QMessageBox.information(self, "Export", msg)
+        except Exception as exc:
+            QMessageBox.critical(self, "Export Error", str(exc))
 
     # ================================================================== #
     # Title, close, unsaved-changes guard
