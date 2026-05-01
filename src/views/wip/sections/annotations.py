@@ -42,7 +42,7 @@ class _AnnotationRow(QWidget):
         self.setCursor(Qt.PointingHandCursor)
 
         h = QHBoxLayout(self)
-        h.setContentsMargins(6, 3, 6, 3)
+        h.setContentsMargins(6, 1, 6, 1)
         h.setSpacing(8)
 
         dot_col = QWidget()
@@ -149,7 +149,7 @@ class AnnotationsSection(QWidget):
 
         self._rows_layout = QVBoxLayout()
         self._rows_layout.setContentsMargins(0, 0, 0, 0)
-        self._rows_layout.setSpacing(1)
+        self._rows_layout.setSpacing(0.5)
         layout.addLayout(self._rows_layout)
 
         self._empty_lbl = QLabel("No annotations")

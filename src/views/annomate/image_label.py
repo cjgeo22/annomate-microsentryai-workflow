@@ -8,8 +8,11 @@ This module defines the `ImageLabel` class, a custom PySide6 widget that handles
 """
 
 from typing import List, Tuple, Optional
+import logging
 import cv2
 import numpy as np
+
+logger = logging.getLogger("AnnoMate.ImageLabel")
 
 from PySide6.QtCore import Qt, QPointF, QRect, QSize, Signal
 from PySide6.QtGui import (
@@ -59,12 +62,13 @@ class ImageLabel(QLabel):
         toolCanceled (): Emitted when ``Escape`` is pressed while a tool is active.
     """
 
-    polygonFinished = Signal(list)        # pts: List[Tuple[float, float]] in original coords
-    polygonEdited   = Signal(int, list)   # (polygon_idx, pts in original coords)
-    polygonSelected = Signal(int)         # polygon index (-1 for deselect)
-    toolCanceled    = Signal()            # Escape pressed while polygon tool active
-    zoom_changed    = Signal(float)       # emitted whenever _zoom changes
-    image_loaded    = Signal(int, int)    # (orig_w, orig_h) emitted when a new image is set
+    polygonFinished   = Signal(list)        # pts: List[Tuple[float, float]] in original coords
+    polygonEdited     = Signal(int, list)   # (polygon_idx, pts in original coords)
+    polygonSelected   = Signal(int)         # polygon index (-1 for deselect)
+    toolCanceled      = Signal()            # Escape pressed while polygon tool active
+    zoom_changed      = Signal(float)       # emitted whenever _zoom changes
+    image_loaded      = Signal(int, int)    # (orig_w, orig_h) emitted when a new image is set
+    ai_polygon_clicked = Signal(int, QPointF)  # (ai_idx, view_pos); -1 = deselect
 
     def __init__(self, parent: object = None) -> None:
         """Initialize ImageLabel with default zoom, pan, and annotation state.
@@ -83,6 +87,8 @@ class ImageLabel(QLabel):
 
         self._orig_image_bgr: Optional[np.ndarray] = None
         self._display_qpix: Optional[QPixmap] = None
+        self._heatmap_pix: Optional[QPixmap] = None
+        self._heatmap_alpha: float = 0.0
 
         self._base_scale = 1.0
         self._zoom = 1.0
@@ -94,12 +100,14 @@ class ImageLabel(QLabel):
 
         self.current_polygon_points: List[QPointF] = []
         self._overlays: List[Tuple[List[QPointF], QColor]] = []
+        self._ai_overlays: List[List[QPointF]] = []
 
         # --- UI State Trackers ---
         self.selected_polygon_idx: int = -1
         self.editing_polygon_idx: int = -1
         self.dragging_vertex_idx: int = -1
         self._dragging_polygon: bool = False
+        self._selected_ai_idx: int = -1
 
     def set_image(self, bgr: np.ndarray, max_display_dim: int = 1200) -> None:
         """Load a BGR ndarray and prepare it for display.
@@ -151,11 +159,56 @@ class ImageLabel(QLabel):
         # --- Reset all tracking states on new image ---
         self.clear_current_polygon()
         self._overlays = []
+        self._ai_overlays = []
+        self._heatmap_pix = None
+        self._heatmap_alpha = 0.0
         self.selected_polygon_idx = -1
         self.editing_polygon_idx = -1
         self.dragging_vertex_idx = -1
         self._dragging_polygon = False
+        self._selected_ai_idx = -1
 
+        self.update()
+
+    def set_heatmap_layer(self, score_map: np.ndarray, alpha: float, heat_min_pct: int = 0) -> None:
+        """Overlay a heatmap on the canvas without resetting zoom or pan.
+
+        Resizes *score_map* to match the stored display pixmap, applies the
+        COLORMAP_JET colormap, and stores the result as a semi-transparent
+        layer drawn at *alpha* opacity during paintEvent.
+
+        Args:
+            score_map: 2-D float array of anomaly scores (any resolution).
+            alpha: Opacity 0.0–1.0.
+            heat_min_pct: Suppress scores below this percentile (0 = show all).
+        """
+        if self._display_qpix is None or score_map is None:
+            return
+        self._heatmap_alpha = max(0.0, min(1.0, alpha))
+        s = score_map.astype(np.float32)
+        if heat_min_pct > 0:
+            thr = np.percentile(s, heat_min_pct)
+            s = np.clip(s - thr, 0.0, None)
+        s_min, s_max = float(s.min()), float(s.max())
+        if s_max <= s_min:
+            self._heatmap_pix = None
+            self.update()
+            return
+        s_norm = ((s - s_min) / (s_max - s_min) * 255.0).astype(np.uint8)
+        colored_bgr = cv2.applyColorMap(s_norm, cv2.COLORMAP_JET)
+        colored_rgb = cv2.cvtColor(colored_bgr, cv2.COLOR_BGR2RGB)
+        pix_w, pix_h = self._display_qpix.width(), self._display_qpix.height()
+        resized = cv2.resize(colored_rgb, (pix_w, pix_h), interpolation=cv2.INTER_LINEAR)
+        resized = np.ascontiguousarray(resized)
+        qimg = QImage(resized.data, resized.shape[1], resized.shape[0],
+                      resized.strides[0], QImage.Format_RGB888)
+        self._heatmap_pix = QPixmap.fromImage(qimg.copy())
+        self.update()
+
+    def clear_heatmap_layer(self) -> None:
+        """Remove the heatmap overlay and repaint."""
+        self._heatmap_pix = None
+        self._heatmap_alpha = 0.0
         self.update()
 
     def set_tool(self, tool_name: Optional[str]) -> None:
@@ -194,7 +247,55 @@ class ImageLabel(QLabel):
                 for (x, y) in pts_orig
             ]
             self._overlays.append((disp_pts, color))
+
+        n = len(self._overlays)
+        if self.editing_polygon_idx >= n:
+            logger.debug(
+                "editing_polygon_idx %d out of range after overlay update (new size %d) — resetting",
+                self.editing_polygon_idx, n,
+            )
+            self.editing_polygon_idx = -1
+            self.setCursor(Qt.ArrowCursor)
+        if self.selected_polygon_idx >= n:
+            logger.debug(
+                "selected_polygon_idx %d out of range after overlay update (new size %d) — resetting",
+                self.selected_polygon_idx, n,
+            )
+            self.selected_polygon_idx = -1
+
         self.update()
+
+    def set_ai_overlays(self, contours: List[List[Tuple[float, float]]]) -> None:
+        """Set AI segmentation polygons rendered as dashed ghost lines.
+
+        Args:
+            contours: List of polygons, each a list of (x, y) in original image coords.
+        """
+        self._ai_overlays = [
+            [QPointF(x * self._base_scale, y * self._base_scale) for (x, y) in pts]
+            for pts in contours
+        ]
+        self._selected_ai_idx = -1
+        self.update()
+
+    def clear_ai_overlays(self) -> None:
+        """Remove all AI polygon overlays and repaint."""
+        self._ai_overlays = []
+        self._selected_ai_idx = -1
+        self.update()
+
+    def get_ai_polygon_view_rect(self, idx: int) -> QRect:
+        """Return the bounding rect of AI polygon *idx* in widget (view) coordinates."""
+        if idx < 0 or idx >= len(self._ai_overlays):
+            return QRect()
+        pts = self._ai_overlays[idx]
+        if not pts:
+            return QRect()
+        xs = [p.x() * self._zoom + self._pan.x() for p in pts]
+        ys = [p.y() * self._zoom + self._pan.y() for p in pts]
+        x0, x1 = int(min(xs)), int(max(xs))
+        y0, y1 = int(min(ys)), int(max(ys))
+        return QRect(x0, y0, x1 - x0, y1 - y0)
 
     def clear_current_polygon(self) -> None:
         """Discard all in-progress polygon vertices and repaint."""
@@ -335,6 +436,23 @@ class ImageLabel(QLabel):
                     found_idx = len(self._overlays) - 1 - i
                     break
 
+            # Check AI polygons when no tool is active and not in edit mode
+            if self.current_tool != POLYGON and self.editing_polygon_idx == -1 and self._ai_overlays:
+                ai_hit = -1
+                for i, pts in enumerate(reversed(self._ai_overlays)):
+                    if len(pts) >= 3 and QPolygonF(pts).containsPoint(pos_disp, Qt.OddEvenFill):
+                        ai_hit = len(self._ai_overlays) - 1 - i
+                        break
+                if ai_hit != -1:
+                    self._selected_ai_idx = ai_hit
+                    self.update()
+                    self.ai_polygon_clicked.emit(ai_hit, pos_view)
+                    return
+                elif self._selected_ai_idx != -1:
+                    self._selected_ai_idx = -1
+                    self.update()
+                    self.ai_polygon_clicked.emit(-1, pos_view)
+
             # 1. Edit Mode: Vertex Dragging & Polygon Dragging
             if self.editing_polygon_idx != -1:
                 pts, _ = self._overlays[self.editing_polygon_idx]
@@ -429,6 +547,14 @@ class ImageLabel(QLabel):
             return
 
         if self.editing_polygon_idx != -1 and not self._dragging_polygon and not self._panning:
+            if self.editing_polygon_idx >= len(self._overlays):
+                logger.warning(
+                    "editing_polygon_idx %d is stale (overlays len %d) — clearing edit mode",
+                    self.editing_polygon_idx, len(self._overlays),
+                )
+                self.editing_polygon_idx = -1
+                self.setCursor(Qt.ArrowCursor)
+                return
             pts, _ = self._overlays[self.editing_polygon_idx]
             hovering = False
             for p_disp in pts:
@@ -571,6 +697,11 @@ class ImageLabel(QLabel):
         painter.scale(self._zoom, self._zoom)
         painter.drawPixmap(0, 0, self._display_qpix)
 
+        if self._heatmap_pix is not None and self._heatmap_alpha > 0:
+            painter.setOpacity(self._heatmap_alpha)
+            painter.drawPixmap(0, 0, self._heatmap_pix)
+            painter.setOpacity(1.0)
+
         # Draw Overlays with Selection Highlighting
         for i, (pts, color) in enumerate(self._overlays):
             if len(pts) >= 2:
@@ -589,6 +720,18 @@ class ImageLabel(QLabel):
                     painter.setPen(QPen(QColor(20, 20, 20), 1))
                     for p in pts:
                         painter.drawEllipse(p, r, r)
+
+        # Draw AI segmentation polygons as dashed ghost outlines
+        for i, pts in enumerate(self._ai_overlays):
+            if len(pts) < 3:
+                continue
+            is_selected = (i == self._selected_ai_idx)
+            pen = QPen(QColor(255, 80, 80), 2.5 if is_selected else 1.5, Qt.DashLine)
+            pen.setDashPattern([6, 4])
+            painter.setPen(pen)
+            fill_alpha = 60 if is_selected else 20
+            painter.setBrush(QBrush(QColor(255, 80, 80, fill_alpha)))
+            painter.drawPolygon(QPolygonF(pts + [pts[0]]))
 
         if self.current_tool == POLYGON and self.current_polygon_points:
             painter.setBrush(Qt.NoBrush)

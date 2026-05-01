@@ -50,7 +50,7 @@ class _ClassRow(QWidget):
         self.setCursor(Qt.PointingHandCursor)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(6, 3, 6, 3)
+        layout.setContentsMargins(6, 1, 6, 1)
         layout.setSpacing(8)
 
         swatch_col = QWidget()
@@ -183,7 +183,7 @@ class ClassesSection(QWidget):
 
         self._rows_layout = QVBoxLayout()
         self._rows_layout.setContentsMargins(0, 0, 0, 0)
-        self._rows_layout.setSpacing(1)
+        self._rows_layout.setSpacing(0.5)
         layout.addLayout(self._rows_layout)
 
         add_row = QWidget()

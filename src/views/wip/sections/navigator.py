@@ -22,10 +22,12 @@ class DataNavigatorSection(QWidget):
     prev_requested = Signal()
     next_requested = Signal()
 
-    def __init__(self, dataset_model, parent: QWidget = None) -> None:
+    def __init__(self, dataset_model, inference_model=None, parent: QWidget = None) -> None:
         super().__init__(parent)
         self.dataset_model = dataset_model
+        self.inference_model = inference_model
         self._dot_labels: list = []
+        self._ai_labels: list = []
         self._init_ui()
         self.dataset_model.modelReset.connect(self._rebuild_list)
         self.dataset_model.dataChanged.connect(self._on_data_changed)
@@ -90,6 +92,7 @@ class DataNavigatorSection(QWidget):
         self.list_widget.blockSignals(True)
         self.list_widget.clear()
         self._dot_labels.clear()
+        self._ai_labels.clear()
 
         total = self.dataset_model.rowCount()
         has_images = total > 0
@@ -121,6 +124,16 @@ class DataNavigatorSection(QWidget):
             h.addWidget(QLabel(Path(self.dataset_model.get_image_filename(row)).stem))
             h.addStretch()
 
+            processed = (
+                self.inference_model is not None
+                and self.inference_model.is_processed(self.dataset_model.get_image_path(row))
+            )
+            ai_dot = _dot("#2196f3")
+            ai_dot.setToolTip("Processed by AI")
+            ai_dot.setVisible(processed)
+            self._ai_labels.append(ai_dot)
+            h.addWidget(ai_dot)
+
             self.list_widget.setItemWidget(item, container)
 
         self.list_widget.blockSignals(False)
@@ -147,3 +160,16 @@ class DataNavigatorSection(QWidget):
         """Update the position counter label (e.g. '5 / 24')."""
         if total > 0:
             self._lbl_counter.setText(f"{current + 1} / {total}")
+
+    def set_row_processed(self, row: int, processed: bool) -> None:
+        """Show or hide the AI indicator dot for a specific row."""
+        if row < len(self._ai_labels):
+            self._ai_labels[row].setVisible(processed)
+
+    def refresh_all_processed(self) -> None:
+        """Update all AI indicators from inference_model."""
+        if self.inference_model is None:
+            return
+        for row in range(self.dataset_model.rowCount()):
+            path = self.dataset_model.get_image_path(row)
+            self.set_row_processed(row, self.inference_model.is_processed(path))

@@ -10,9 +10,10 @@ Rules (consistent with other views):
 
 import os
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QMainWindow, QTabWidget, QVBoxLayout, QWidget, QInputDialog,
-    QFileDialog, QMessageBox,
+    QFileDialog, QMessageBox, QToolButton,
 )
 from PySide6.QtGui import QAction, QKeySequence
 
@@ -84,6 +85,16 @@ class AppWindow(QMainWindow):
         self.tabs.addTab(self.sentry_view,     "MicroSentry AI")
         self.tabs.addTab(self.validation_view, "Validation")
         self.tabs.addTab(self.wip_view,        "WIP")
+
+        self._btn_ms = QToolButton()
+        self._btn_ms.setText("Enable Microsentry")
+        self._btn_ms.setCheckable(True)
+        self._btn_ms.setChecked(False)
+        self._btn_ms.setToolTip("Toggle MicroSentryAI heatmap and segmentation")
+        self._btn_ms.toggled.connect(self.wip_view._on_microsentry_toggled)
+        self._btn_ms.setVisible(False)
+        self.tabs.setCornerWidget(self._btn_ms, Qt.TopRightCorner)
+        self.tabs.currentChanged.connect(self._on_tab_changed)
 
         central = QWidget()
         layout = QVBoxLayout(central)
@@ -337,6 +348,9 @@ class AppWindow(QMainWindow):
                 return
         self.project_controller.autosave_manager.stop()
         super().closeEvent(event)
+
+    def _on_tab_changed(self, index: int) -> None:
+        self._btn_ms.setVisible(index == self.tabs.indexOf(self.wip_view))
 
     # ================================================================== #
     # Polygon transfer

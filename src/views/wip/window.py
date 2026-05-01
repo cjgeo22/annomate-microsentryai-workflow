@@ -12,17 +12,75 @@ Color scheme: no explicit stylesheet colors — Qt platform palette only.
 
 import os
 
-from PySide6.QtCore import Qt, QEvent
+import cv2
+import numpy as np
+from PySide6.QtCore import Qt, QEvent, QPointF, Signal
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
-    QWidget, QFrame, QVBoxLayout, QHBoxLayout, QSizePolicy,
-    QSplitter, QToolButton,
+    QWidget, QFrame, QVBoxLayout, QSizePolicy,
+    QSplitter, QToolButton, QFileDialog, QInputDialog, QMessageBox, QHBoxLayout, QComboBox
 )
 
 from views.annomate.image_label import ImageLabel
 from views.wip.right_panel import RightPanel
 from views.wip.tool_palette import ToolPalette
 from views.wip.status_bar import WIPStatusBar
+
+
+class _AIAcceptPopup(QFrame):
+    """Floating accept button + class selector for a selected AI polygon."""
+
+    accepted = Signal()
+
+    _BTN_SIZE = 28
+
+    def __init__(self, canvas: QWidget, parent: QWidget = None) -> None:
+        super().__init__(parent or canvas)
+        self._canvas = canvas
+        self.setFrameStyle(QFrame.StyledPanel | QFrame.Raised)
+        self.setAutoFillBackground(True)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(4)
+
+        btn_accept = QToolButton()
+        btn_accept.setText("✓")
+        btn_accept.setToolTip("Accept polygon into selected class")
+        btn_accept.setFixedSize(self._BTN_SIZE, self._BTN_SIZE)
+        btn_accept.clicked.connect(self.accepted)
+        layout.addWidget(btn_accept)
+
+        self._combo = QComboBox()
+        self._combo.setToolTip("Class to assign polygon to")
+        layout.addWidget(self._combo)
+
+        self.adjustSize()
+        self.setVisible(False)
+
+    def set_classes(self, names: list, active: str) -> None:
+        self._combo.blockSignals(True)
+        self._combo.clear()
+        self._combo.addItems(names)
+        if active in names:
+            self._combo.setCurrentIndex(names.index(active))
+        self._combo.blockSignals(False)
+
+    def current_class(self) -> str:
+        return self._combo.currentText()
+
+    def show_at_polygon(self, bbox) -> None:
+        """Position just outside the right edge of *bbox* (a QRect in widget coords)."""
+        x = bbox.right() + 8
+        y = bbox.top()
+        # If too close to the right edge, flip to the left side
+        if x + self.width() > self._canvas.width():
+            x = bbox.left() - self.width() - 8
+        x = max(0, x)
+        y = max(0, min(y, self._canvas.height() - self.height()))
+        self.move(x, y)
+        self.setVisible(True)
+        self.raise_()
 
 
 class _ZoomToolbar(QFrame):
@@ -75,13 +133,26 @@ class WIPWindow(QWidget):
         parent: Optional Qt parent widget.
     """
 
-    def __init__(self, dataset_model, io_controller, parent: QWidget = None) -> None:
+    def __init__(
+        self,
+        dataset_model,
+        io_controller,
+        inference_model=None,
+        inference_controller=None,
+        parent: QWidget = None,
+    ) -> None:
         super().__init__(parent)
         self.dataset_model = dataset_model
         self.io_controller = io_controller
+        self.inference_model = inference_model
+        self.inference_controller = inference_controller
         self._current_row: int = -1
         self._active_class: str = ""
         self._active_tool: str = ""
+        self._microsentry_enabled: bool = False
+        self._current_bgr = None
+        self._current_ai_contours: list = []
+        self._selected_ai_idx: int = -1
         self._init_ui()
 
         # Dataset changes
@@ -89,7 +160,9 @@ class WIPWindow(QWidget):
 
         # Canvas → navigation / annotation
         self.canvas.polygonFinished.connect(self._on_polygon_finished)
+        self.canvas.polygonEdited.connect(self._on_polygon_edited)
         self.canvas.toolCanceled.connect(self._on_tool_canceled)
+        self.canvas.ai_polygon_clicked.connect(self._on_ai_polygon_clicked)
 
         # Canvas → status bar (live feedback)
         self.canvas.zoom_changed.connect(self.status_bar.set_zoom)
@@ -101,12 +174,21 @@ class WIPWindow(QWidget):
         self.right_panel.prev_requested.connect(self._prev_image)
         self.right_panel.next_requested.connect(self._next_image)
         self.right_panel.annotation_selected.connect(self._on_annotation_selected)
+        self.right_panel.load_model_requested.connect(self._on_load_model_requested)
+        self.right_panel.microsentry_settings_changed.connect(self._refresh_canvas_render)
+        self.right_panel.accept_polygons_requested.connect(self._on_accept_ai_polygons)
 
         # Keep canvas in sync when annotations change outside the canvas
         self.dataset_model.dataChanged.connect(self._on_dataset_data_changed)
 
         # Tool palette
         self.tool_palette.tool_selected.connect(self._on_tool_selected)
+
+        # Inference controller signals
+        if self.inference_controller is not None:
+            self.inference_controller.result_ready.connect(self._on_inference_result)
+            self.inference_controller.progress.connect(self._on_inference_progress)
+            self.inference_controller.batch_done.connect(self._on_inference_batch_done)
 
     # ------------------------------------------------------------------ #
     # UI construction
@@ -143,9 +225,13 @@ class WIPWindow(QWidget):
 
         self._zoom_toolbar = _ZoomToolbar(self.canvas, self.canvas)
         self._zoom_toolbar.raise_()
+
+        self._ai_popup = _AIAcceptPopup(self.canvas, self.canvas)
+        self._ai_popup.accepted.connect(self._on_accept_single_ai)
+
         self.canvas.installEventFilter(self)
 
-        self.right_panel = RightPanel(self.dataset_model, self)
+        self.right_panel = RightPanel(self.dataset_model, self.inference_model, self)
         self.right_panel.setMinimumWidth(160)
         splitter.addWidget(self.right_panel)
 
@@ -181,10 +267,13 @@ class WIPWindow(QWidget):
         bgr = self.io_controller.load_image_for_display(row)
         if bgr is None:
             return
-        self.canvas.set_image(bgr)
-        self.status_bar.set_zoom(1.0)   # set_image resets zoom without emitting zoom_changed
+        self._current_bgr = bgr
         self._current_row = row
-        self._refresh_overlays()
+        self._ai_popup.setVisible(False)
+        self._selected_ai_idx = -1
+        self.canvas.set_image(bgr)      # always set the original; resets zoom (expected on new image)
+        self.status_bar.set_zoom(1.0)   # set_image resets zoom without emitting zoom_changed
+        self._refresh_canvas_render()   # apply heatmap / overlay layer without resetting zoom
         total = self.dataset_model.rowCount()
         self.right_panel.set_counter(row, total)
         self.right_panel.select_row(row)
@@ -229,18 +318,23 @@ class WIPWindow(QWidget):
             return
         target = self._active_class if self._active_class in class_names else class_names[0]
         self.dataset_model.add_annotation(self._current_row, target, pts)
-        self._refresh_overlays()
+        self._refresh_canvas_render()
+
+    def _on_polygon_edited(self, idx: int, pts: list) -> None:
+        if self._current_row < 0 or self.canvas.is_dragging():
+            return
+        self.dataset_model.update_annotation_points(self._current_row, idx, pts)
 
     def _on_dataset_data_changed(self, *_) -> None:
         if self._current_row >= 0:
-            self._refresh_overlays()
+            self._refresh_canvas_render()
 
     def _on_annotation_selected(self, idx: int) -> None:
         self.canvas.selected_polygon_idx = idx
         self.canvas.update()
 
     def _refresh_overlays(self) -> None:
-        """Rebuild canvas overlays from the current row's annotations. V4: QColor here."""
+        """Rebuild canvas overlays from annotations only (no AI polygons). V4: QColor here."""
         annos = self.dataset_model.get_annotations(self._current_row)
         overlays = [
             (a["polygon"], QColor(*self.dataset_model.get_class_color(a["category_name"])))
@@ -248,3 +342,203 @@ class WIPWindow(QWidget):
         ]
         self.canvas.selected_polygon_idx = -1
         self.canvas.set_overlays(overlays)
+        self.canvas.clear_ai_overlays()
+
+    def _update_canvas_overlays(self, anno_overlays: list) -> None:
+        """Push annotation overlays and current AI contours to the canvas."""
+        self.canvas.set_overlays(anno_overlays)
+        self.canvas.set_ai_overlays(self._current_ai_contours)
+
+    # ------------------------------------------------------------------ #
+    # Microsentry toggle & rendering
+    # ------------------------------------------------------------------ #
+
+    def _on_microsentry_toggled(self, checked: bool) -> None:
+        self._microsentry_enabled = checked
+        if checked:
+            if self.inference_controller is not None and self.inference_controller.has_model():
+                self.right_panel.set_model_loaded(self.inference_controller.get_model_name())
+                self._start_pending_inference()
+            self.right_panel.show_microsentry_section()
+        else:
+            self.right_panel.hide_microsentry_section()
+        self._refresh_canvas_render()
+
+    def _on_load_model_requested(self) -> None:
+        if self.inference_controller is None:
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load AI Model", os.getcwd(), "PyTorch Model (*.pt *.pth);;All Files (*)"
+        )
+        if not path:
+            return
+        device, ok = QInputDialog.getItem(
+            self, "Select Device", "Inference device:", ["cpu", "cuda"], 0, False
+        )
+        if not ok:
+            return
+        try:
+            name = self.inference_controller.load_model(path, device)
+        except Exception as exc:
+            QMessageBox.critical(self, "Load Model", f"Could not load model:\n{exc}")
+            return
+        self.right_panel.set_model_loaded(name)
+        self._start_pending_inference()
+
+    def _start_pending_inference(self) -> None:
+        if self.inference_controller is None or not self.inference_controller.has_model():
+            return
+        total = self.dataset_model.rowCount()
+        paths = [
+            self.dataset_model.get_image_path(i)
+            for i in range(total)
+            if not self.inference_model.is_processed(self.dataset_model.get_image_path(i))
+        ]
+        if paths:
+            self.inference_controller.start_batch_inference(paths)
+
+    def _refresh_canvas_render(self) -> None:
+        """Update heatmap layer and polygon overlays without resetting zoom or pan.
+
+        Never calls canvas.set_image — that lives exclusively in _load_row so
+        that zoom only resets when the user navigates to a new image.
+        """
+        if self._current_row < 0 or self._current_bgr is None:
+            return
+
+        ms_active = (
+            self._microsentry_enabled
+            and self.inference_controller is not None
+            and self.inference_controller.has_model()
+        )
+
+        if not ms_active:
+            self.canvas.clear_heatmap_layer()
+            self._refresh_overlays()
+            return
+
+        path = self.dataset_model.get_image_path(self._current_row)
+        if not self.inference_model.is_processed(path):
+            self.canvas.clear_heatmap_layer()
+            self._refresh_overlays()
+            return
+
+        ms = self.right_panel.get_microsentry_settings()
+        score_map = self.inference_model.get_score_map(path)
+
+        # Smooth the score map with the configured sigma
+        s = score_map.astype(np.float32)
+        sigma = ms["sigma"]
+        if sigma > 0:
+            ksize = int(sigma * 6 + 1) | 1  # ensure odd
+            s = cv2.GaussianBlur(s, (ksize, ksize), sigma)
+
+        # Heatmap layer — drawn as a semi-transparent QPixmap over the original
+        if ms["heatmap_enabled"]:
+            self.canvas.set_heatmap_layer(s, ms["alpha"], ms["heat_min"])
+        else:
+            self.canvas.clear_heatmap_layer()
+
+        # Annotation overlays are always shown
+        annos = self.dataset_model.get_annotations(self._current_row)
+        anno_overlays = [
+            (a["polygon"], QColor(*self.dataset_model.get_class_color(a["category_name"])))
+            for a in annos
+        ]
+
+        # AI segmentation overlays — computed fresh, stored for per-polygon accept/reject
+        if ms["seg_enabled"]:
+            orig_h, orig_w = self._current_bgr.shape[:2]
+            self._current_ai_contours = self.inference_controller.compute_segmentation(
+                s, ms["seg_pct"], ms["epsilon"], orig_w, orig_h
+            )
+        else:
+            self._current_ai_contours = []
+
+        self._ai_popup.setVisible(False)
+        self._selected_ai_idx = -1
+        self.canvas.selected_polygon_idx = -1
+        self._update_canvas_overlays(anno_overlays)
+
+    # ------------------------------------------------------------------ #
+    # Inference signal slots
+    # ------------------------------------------------------------------ #
+
+    def _on_inference_result(self, path: str, score_map) -> None:
+        self.inference_model.set_score_map(path, score_map)
+        row = self._row_for_path(path)
+        if row >= 0:
+            self.right_panel.navigator_set_processed(row, True)
+        if row == self._current_row and self._microsentry_enabled:
+            self._refresh_canvas_render()
+
+    def _on_inference_progress(self, done: int) -> None:
+        total = self.dataset_model.rowCount()
+        self.status_bar.set_inference_progress(done, total)
+
+    def _on_inference_batch_done(self) -> None:
+        self.status_bar.clear_inference_progress()
+        self.right_panel.refresh_navigator_processed()
+
+    def _on_ai_polygon_clicked(self, idx: int, view_pos: QPointF) -> None:
+        self._selected_ai_idx = idx
+        if idx == -1:
+            self._ai_popup.setVisible(False)
+            return
+        class_names = self.dataset_model.get_class_names()
+        if not class_names:
+            self._ai_popup.setVisible(False)
+            return
+        self._ai_popup.set_classes(class_names, self._active_class)
+        bbox = self.canvas.get_ai_polygon_view_rect(idx)
+        self._ai_popup.show_at_polygon(bbox)
+
+    def _on_accept_single_ai(self) -> None:
+        idx = self._selected_ai_idx
+        if idx < 0 or idx >= len(self._current_ai_contours):
+            return
+        pts = self._current_ai_contours[idx]
+        if len(pts) >= 3:
+            target = self._ai_popup.current_class()
+            if not target:
+                class_names = self.dataset_model.get_class_names()
+                target = self._active_class if self._active_class in class_names else (class_names[0] if class_names else "")
+            if target:
+                self.dataset_model.add_annotation(self._current_row, target, pts)
+        del self._current_ai_contours[idx]
+        self._selected_ai_idx = -1
+        self._ai_popup.setVisible(False)
+        self._push_overlays_after_edit()
+
+    def _push_overlays_after_edit(self) -> None:
+        """Refresh canvas overlays from current annotations + remaining AI contours."""
+        if self._current_row < 0:
+            return
+        annos = self.dataset_model.get_annotations(self._current_row)
+        anno_overlays = [
+            (a["polygon"], QColor(*self.dataset_model.get_class_color(a["category_name"])))
+            for a in annos
+        ]
+        self._update_canvas_overlays(anno_overlays)
+
+    def _on_accept_ai_polygons(self) -> None:
+        """Add all current AI contours as annotations on the active class."""
+        if self._current_row < 0 or not self._current_ai_contours:
+            return
+        class_names = self.dataset_model.get_class_names()
+        if not class_names:
+            return
+        target = self._active_class if self._active_class in class_names else class_names[0]
+        for pts in self._current_ai_contours:
+            if len(pts) >= 3:
+                self.dataset_model.add_annotation(self._current_row, target, pts)
+        self._current_ai_contours = []
+        self._selected_ai_idx = -1
+        self._ai_popup.setVisible(False)
+        self._refresh_canvas_render()
+
+    def _row_for_path(self, path: str) -> int:
+        for i in range(self.dataset_model.rowCount()):
+            if self.dataset_model.get_image_path(i) == path:
+                return i
+        return -1

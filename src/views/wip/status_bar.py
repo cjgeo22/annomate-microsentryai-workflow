@@ -48,6 +48,10 @@ class WIPStatusBar(QWidget):
 
         h.addStretch()
 
+        self._lbl_ai = QLabel("")
+        self._lbl_ai.setVisible(False)
+        h.addWidget(self._lbl_ai)
+
         self._lbl_task = QLabel("Ready")
         h.addWidget(self._lbl_task)
 
@@ -74,3 +78,10 @@ class WIPStatusBar(QWidget):
 
     def set_task_status(self, msg: str) -> None:
         self._lbl_task.setText(msg)
+
+    def set_inference_progress(self, done: int, total: int) -> None:
+        self._lbl_ai.setText(f"AI: {done}/{total}  |  ")
+        self._lbl_ai.setVisible(True)
+
+    def clear_inference_progress(self) -> None:
+        self._lbl_ai.setVisible(False)

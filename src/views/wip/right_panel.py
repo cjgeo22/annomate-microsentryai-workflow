@@ -7,6 +7,7 @@ from views.wip.sections import (
     ClassesSection,
     AnnotationsSection,
     MetadataSection,
+    MicrosentrySection,
 )
 
 
@@ -18,15 +19,20 @@ class RightPanel(QWidget):
         class_selected (str): Forwarded from ClassesSection.
         prev_requested (): Forwarded from DataNavigatorSection.
         next_requested (): Forwarded from DataNavigatorSection.
+        load_model_requested (): Forwarded from MicrosentrySection.
+        microsentry_settings_changed (): Forwarded from MicrosentrySection.
     """
 
-    image_selected      = Signal(int)
-    class_selected      = Signal(str)
-    prev_requested      = Signal()
-    next_requested      = Signal()
-    annotation_selected = Signal(int)
+    image_selected               = Signal(int)
+    class_selected               = Signal(str)
+    prev_requested               = Signal()
+    next_requested               = Signal()
+    annotation_selected          = Signal(int)
+    load_model_requested         = Signal()
+    microsentry_settings_changed = Signal()
+    accept_polygons_requested    = Signal()
 
-    def __init__(self, dataset_model, parent: QWidget = None) -> None:
+    def __init__(self, dataset_model, inference_model=None, parent: QWidget = None) -> None:
         super().__init__(parent)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -41,8 +47,19 @@ class RightPanel(QWidget):
         cl.setContentsMargins(0, 0, 0, 0)
         cl.setSpacing(0)
 
+        # Microsentry section — hidden until Enable Microsentry is toggled on
+        ms_sec = _CollapsibleSection("Microsentry")
+        ms_sec.setVisible(False)
+        self._ms_section = MicrosentrySection()
+        self._ms_section.load_model_requested.connect(self.load_model_requested)
+        self._ms_section.settings_changed.connect(self.microsentry_settings_changed)
+        self._ms_section.accept_polygons_requested.connect(self.accept_polygons_requested)
+        ms_sec.body_layout().addWidget(self._ms_section)
+        cl.addWidget(ms_sec)
+        self._ms_collapsible = ms_sec
+
         nav_sec = _CollapsibleSection("Dataset Navigator")
-        self.navigator = DataNavigatorSection(dataset_model)
+        self.navigator = DataNavigatorSection(dataset_model, inference_model)
         self.navigator.image_selected.connect(self.image_selected)
         self.navigator.prev_requested.connect(self.prev_requested)
         self.navigator.next_requested.connect(self.next_requested)
@@ -83,3 +100,32 @@ class RightPanel(QWidget):
         self.classes.set_current_row(row)
         self.annotations.set_current_row(row)
         self.metadata.set_current_row(row)
+
+    # ------------------------------------------------------------------ #
+    # Microsentry pass-throughs
+    # ------------------------------------------------------------------ #
+
+    def set_model_loaded(self, name: str) -> None:
+        self._ms_section.set_model_loaded(name)
+
+    def set_no_model(self) -> None:
+        self._ms_section.set_no_model()
+
+    def get_microsentry_settings(self) -> dict:
+        return self._ms_section.get_settings()
+
+    def show_microsentry_section(self) -> None:
+        """Make the Microsentry section visible and expanded."""
+        self._ms_collapsible.setVisible(True)
+        self._ms_collapsible._on_toggle(True)
+        self._ms_collapsible._toggle_btn.setChecked(True)
+
+    def hide_microsentry_section(self) -> None:
+        """Fully hide the Microsentry section."""
+        self._ms_collapsible.setVisible(False)
+
+    def navigator_set_processed(self, row: int, processed: bool) -> None:
+        self.navigator.set_row_processed(row, processed)
+
+    def refresh_navigator_processed(self) -> None:
+        self.navigator.refresh_all_processed()
