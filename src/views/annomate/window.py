@@ -339,9 +339,20 @@ class AnnoMateWindow(QWidget):
         splitter.setHandleWidth(8)
         splitter.setChildrenCollapsible(False)
 
-        self.canvas = ImageLabel(self)
+        canvas_container = QWidget()
+        canvas_layout = QVBoxLayout(canvas_container)
+        canvas_layout.setContentsMargins(0, 0, 0, 0)
+        canvas_layout.setSpacing(0)
+
+        from views.annomate.top_bar import TopBar
+        self.top_bar = TopBar(canvas_container)
+        canvas_layout.addWidget(self.top_bar)
+
+        self.canvas = ImageLabel(canvas_container)
         self.canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        splitter.addWidget(self.canvas)
+        canvas_layout.addWidget(self.canvas)
+        
+        splitter.addWidget(canvas_container)
 
         self._zoom_toolbar = _ZoomToolbar(self.canvas, self.canvas)
         self._zoom_toolbar.raise_()
