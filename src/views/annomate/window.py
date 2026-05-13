@@ -345,13 +345,14 @@ class AnnoMateWindow(QWidget):
         canvas_layout.setSpacing(0)
 
         from views.annomate.top_bar import TopBar
+
         self.top_bar = TopBar(canvas_container)
         canvas_layout.addWidget(self.top_bar)
 
         self.canvas = ImageLabel(canvas_container)
         self.canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         canvas_layout.addWidget(self.canvas)
-        
+
         splitter.addWidget(canvas_container)
 
         self._zoom_toolbar = _ZoomToolbar(self.canvas, self.canvas)
