@@ -86,6 +86,7 @@ class ImageLabel(QLabel):
         self.setFocusPolicy(Qt.StrongFocus)  # Allow widget to catch Key_Escape
 
         self.current_tool: Optional[str] = None
+        self._draw_mode: str = "point" # "point", "circle", "rectangle", or "brush"
         self._active_color = QColor(0, 200, 0)
         self._line_thickness = 2.0
 
@@ -265,6 +266,18 @@ class ImageLabel(QLabel):
             self.setCursor(Qt.CrossCursor)
         elif tool_name is None:
             self.setCursor(Qt.ArrowCursor)
+
+    def set_draw_mode(self, mode: str) -> None:
+        """Set the drawing mode for the polygon tool.
+
+        Args:
+            mode (str): Drawing mode identifier — ``"point"``, ``"circle"``,
+                ``"rectangle"``, or ``"brush"``.
+        """
+        if mode in {"point", "circle", "rectangle", "brush"}:
+            self._draw_mode = mode
+        else:
+            logger.warning("Invalid draw mode: %s", mode)
 
     def set_active_color(self, color: QColor) -> None:
         """Set the stroke color used when drawing a new polygon.

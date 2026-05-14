@@ -3,7 +3,6 @@ ToolPalette — left tool column for the AnnoMate main window.
 
 Layout (top to bottom):
   ⬠  Polygon tool
-  ◢  Brush thickness popup
   ── divider ──
   ✦  SAM Segment tool
   ⚙  SAM Options popup
@@ -82,40 +81,6 @@ class ToolPalette(QFrame):
         self._btn_tool[poly_btn] = "polygon"
         self._btn_group.addButton(poly_btn)
         layout.addWidget(poly_btn)
-
-        # ------------------------------------------------------------------ #
-        # Brush thickness popup
-        # ------------------------------------------------------------------ #
-        btn_thickness = QToolButton()
-        btn_thickness.setText("◢")
-        btn_thickness.setToolTip("Brush Thickness")
-        btn_thickness.setFixedSize(_BTN_W, _BTN_H)
-        btn_thickness.setFont(font)
-        btn_thickness.setPopupMode(QToolButton.InstantPopup)
-
-        thickness_menu = QMenu(self)
-        thickness_action = QWidgetAction(self)
-        t_container = QWidget()
-        t_h = QHBoxLayout(t_container)
-        t_h.setContentsMargins(8, 4, 8, 4)
-
-        self.slider_thickness = QSlider(Qt.Horizontal)
-        self.slider_thickness.setRange(1, 40)
-        self.slider_thickness.setValue(8)  # 8 × 0.25 = 2.00 px default
-        self.slider_thickness.setTickPosition(QSlider.TickPosition.TicksBelow)
-        self.slider_thickness.setTickInterval(4)
-        self.slider_thickness.setMinimumWidth(150)
-
-        self.lbl_thickness = QLabel("2.00 px")
-        self.lbl_thickness.setFixedWidth(55)
-
-        t_h.addWidget(self.slider_thickness)
-        t_h.addWidget(self.lbl_thickness)
-        thickness_action.setDefaultWidget(t_container)
-        thickness_menu.addAction(thickness_action)
-        btn_thickness.setMenu(thickness_menu)
-        layout.addWidget(btn_thickness)
-        self.slider_thickness.valueChanged.connect(self._on_slider_changed)
 
         # ------------------------------------------------------------------ #
         # Divider
@@ -218,11 +183,6 @@ class ToolPalette(QFrame):
         else:
             self._active_tool = tool_name
             self.tool_selected.emit(tool_name)
-
-    def _on_slider_changed(self, value: int) -> None:
-        thickness = value * 0.25
-        self.lbl_thickness.setText(f"{thickness:.2f} px")
-        self.thickness_changed.emit(thickness)
 
     def _toggle_tool(self, tool_name: str) -> None:
         for btn, name in self._btn_tool.items():

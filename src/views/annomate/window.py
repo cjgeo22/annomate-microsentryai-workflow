@@ -284,8 +284,9 @@ class AnnoMateWindow(QWidget):
         self.tool_palette.tool_selected.connect(self._on_tool_selected)
         self.canvas.draw_attempted.connect(self._on_draw_attempted)
 
-        # Route thickness signal directly to canvas setter
-        self.tool_palette.thickness_changed.connect(self._on_thickness_changed)
+        # Top Bar signals
+        self.top_bar.thickness_changed.connect(self._on_thickness_changed)
+        self.top_bar.draw_mode_changed.connect(self.canvas.set_draw_mode)
 
         # SAM tool
         self.canvas.samBboxDrawn.connect(self._on_sam_bbox_drawn)
@@ -446,6 +447,13 @@ class AnnoMateWindow(QWidget):
     # ------------------------------------------------------------------ #
 
     def _on_tool_selected(self, tool_name: str) -> None:
+        self.top_bar.set_context(tool_name)
+
+        if tool_name:
+            self.top_bar.set_expanded(True)
+        else:
+            self.top_bar.set_expanded(False)
+
         if tool_name == "sam_bbox":
             self._active_tool = "sam_bbox"
             self.canvas.set_tool(SAM_BBOX)
@@ -467,6 +475,14 @@ class AnnoMateWindow(QWidget):
         self._active_tool = ""
         self.status_bar.set_tool("")
         self.status_bar.set_sam_hint("")
+
+        # If a polygon is currently selected, fall backl to edit mode
+        if self.canvas.selected_polygon_idx != -1:
+            self.top_bar.set_context("edit_polygon")
+            self.top_bar.set_expanded(True)
+        else:
+            self.top_bar.set_context("")
+            self.top_bar.set_expanded(False)
 
     def _on_draw_attempted(self) -> None:
         """Guard against drawing without a valid class; cancels the tool if missing."""
@@ -547,16 +563,17 @@ class AnnoMateWindow(QWidget):
             annos = self.dataset_model.get_annotations(self._current_row)
             if 0 <= idx < len(annos):
                 thick = annos[idx].get("thickness", 2.0)
-
-                # Block signals so setting the slider doesn't accidentally trigger a drawing update
-                self.tool_palette.slider_thickness.blockSignals(True)
-                self.tool_palette.slider_thickness.setValue(
-                    int(thick * 4)
-                )  # slider is 1-40
-                self.tool_palette.lbl_thickness.setText(f"{thick:.2f} px")
-                self.tool_palette.slider_thickness.blockSignals(False)
-
+                self.top_bar.set_thickness(thick)
                 self.canvas.set_line_thickness(thick)
+
+        if not self._active_tool:
+            # Auto expand/collapse Edit Mode when no tool is selected
+            if idx != -1:
+                self.top_bar.set_context("edit_polygon")
+                self.top_bar.set_expanded(True)
+            else:
+                self.top_bar.set_context("")
+                self.top_bar.set_expanded(False)
 
     def _refresh_overlays(self) -> None:
         """Rebuild canvas overlays from annotations only (no AI polygons)."""
@@ -588,13 +605,12 @@ class AnnoMateWindow(QWidget):
         # Always update the canvas so future drawing uses this thickness
         self.canvas.set_line_thickness(thickness)
 
-        # If we are NOT actively drawing, and a polygon is selected, mutate its data
-        if self._active_tool != "polygon":
-            idx = self.canvas.selected_polygon_idx
-            if idx != -1 and self._current_row >= 0:
-                self.dataset_model.update_annotation_thickness(
-                    self._current_row, idx, thickness
-                )
+        #If a polygon is selected, update it's thickness
+        idx = self.canvas.selected_polygon_idx
+        if idx != -1 and self._current_row >= 0:
+            self.dataset_model.update_annotation_thickness(
+                self._current_row, idx, thickness
+            )
 
     # ------------------------------------------------------------------ #
     # Microsentry toggle & rendering
